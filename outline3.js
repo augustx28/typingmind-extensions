@@ -1,6 +1,6 @@
 // TypingMind Page Outline Extension v3
 // Floating outline/TOC panel from headers in the active chat.
-// Button only visible on chat pages. Ctrl+Shift+O shortcut.
+// Button only visible on chat pages. Ctrl+Shift+O shortcut. 
  
 (function () {
   'use strict';
