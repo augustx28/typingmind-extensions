@@ -3,21 +3,6 @@
   const COLOR = '#161616';
 
   const css = `
-    /* ── LIGHT MODE: user message bubble (keep as-is, blue + white text) ── */
-    html:not(.dark) [data-element-id="user-message"],
-    body:not(.dark) [data-element-id="user-message"] {
-      background-color: #2563eb !important;
-      color: #ffffff !important;
-    }
-
-    /* ── DARK MODE: user message bubble → #262525 bg + #dfdedb text ── */
-    html.dark [data-element-id="user-message"],
-    body.dark [data-element-id="user-message"],
-    .dark [data-element-id="user-message"] {
-      background-color: #262525 !important;
-      color: #dfdedb !important;
-    }
-
     /* 1) .md:flex .overflow-y-auto .resize-container */
     html.dark .md\\:flex .overflow-y-auto .resize-container,
     body.dark .md\\:flex .overflow-y-auto .resize-container,
@@ -81,7 +66,7 @@
       style.id = EXT_ID;
       document.head.appendChild(style);
     }
-    style.textContent = css;
+    if (style.textContent !== css) style.textContent = css;
   }
 
   function init() {
