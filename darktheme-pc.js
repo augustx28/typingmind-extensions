@@ -97,7 +97,7 @@
       html.dark [id^="response-"] > div > [class*="border"],
       body.dark [id^="response-"] > div > [class*="border"],
       .dark [id^="response-"] > div > [class*="border"] {
-        border-color: rgba(75, 85, 99, 0.05) !important;
+        border-color: rgba(75, 85, 99, 0.09) !important;
       }
     }
   `;
