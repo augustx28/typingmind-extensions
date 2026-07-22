@@ -100,6 +100,36 @@
         border-color: rgba(75, 85, 99, 0.09) !important;
       }
     }
+
+    /* 11) FIX — DARK MODE: native <select> dropdown lists.
+       The theme repaints the app's own surfaces, but the open list of a
+       native <select> is drawn by the browser using the select/option
+       colors, which nothing above ever sets. The options fell through
+       with low-contrast gray on a dark popup (nearly invisible).
+       This makes them readable and tells the browser to render the
+       popup itself as dark. Light mode is untouched. */
+    html.dark select,
+    body.dark select,
+    .dark select {
+      color-scheme: dark !important;
+    }
+
+    html.dark select option,
+    body.dark select option,
+    .dark select option,
+    html.dark select optgroup,
+    body.dark select optgroup,
+    .dark select optgroup {
+      background-color: ${COLOR} !important;
+      color: #dfdedb !important;
+    }
+
+    /* Keep genuinely disabled options visually distinct */
+    html.dark select option:disabled,
+    body.dark select option:disabled,
+    .dark select option:disabled {
+      color: #8a8a8a !important;
+    }
   `;
 
   function upsertStyle() {
@@ -111,7 +141,11 @@
       document.head.appendChild(style);
     }
 
-    style.textContent = css;
+    /* FIX: only rewrite when the content actually changed, otherwise every
+       class flip on <html>/<body> forces a full style recalculation. */
+    if (style.textContent !== css) {
+      style.textContent = css;
+    }
   }
 
   function init() {
@@ -130,6 +164,11 @@
         attributeFilter: ['class', 'data-theme']
       });
     }
+
+    /* FIX: re-inject the style tag if the app ever re-renders <head> and
+       drops it (before, the theme would silently die until the next
+       light/dark toggle). Safe from loops thanks to the equality check. */
+    observer.observe(document.head, { childList: true });
   }
 
   if (document.readyState === 'loading') {
