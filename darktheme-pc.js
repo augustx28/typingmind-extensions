@@ -1,5 +1,5 @@
 (() => {
-  const EXT_ID = 'custom-dark-theme-only-v2';
+  const EXT_ID = 'darktheme-pc';
   const COLOR = '#262626';
 
   const css = `
