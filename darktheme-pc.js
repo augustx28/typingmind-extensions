@@ -139,7 +139,34 @@
     .dark select option:disabled {
       color: rgba(223, 222, 219, 0.45) !important;
     }
+
+    /* 12) FIX — no transitions/animations on dropdown items.
+       The native popup snapshots its colors the instant it opens; if the
+       app animates color changes, the popup can capture a mid-transition
+       (dark-on-dark) frame and only correct itself later. Zeroing these
+       makes the final themed colors apply instantly. Scoped to <option>/
+       <optgroup> only, so nothing else in the UI loses its animations. */
+    html.dark select option,
+    body.dark select option,
+    .dark select option,
+    html.dark select optgroup,
+    body.dark select optgroup,
+    .dark select optgroup {
+      transition: none !important;
+      animation: none !important;
+    }
   `;
+
+  /* Tracks the current live <style> element so we can guard its contents. */
+  let styleEl = null;
+
+  /* Watches OUR style tag itself. If anything else (e.g. an older copy of
+     this script still installed, or an app cleanup pass) rewrites or empties
+     it, we restore the correct CSS immediately instead of waiting for the
+     next theme-class change — which was the "dark for a few seconds, then
+     correct" window. Safe from loops: our own restore writes identical
+     content, so the follow-up callback is a no-op. */
+  const contentGuard = new MutationObserver(upsertStyle);
 
   function upsertStyle() {
     let style = document.getElementById(EXT_ID);
@@ -150,12 +177,45 @@
       document.head.appendChild(style);
     }
 
-    /* FIX: only write when the content actually differs. The old version
-       reassigned the full stylesheet on every class change on <html>/<body>,
-       forcing a needless full style recalculation each time. */
+    /* Only write when the content actually differs — avoids forcing a
+       style recalc on every unrelated mutation. */
     if (style.textContent !== css) {
       style.textContent = css;
     }
+
+    /* FIX: keep our tag as the LAST element in <head>. TypingMind lazy-loads
+       CSS chunks (e.g. when the Models modal opens); if one lands after us,
+       it wins !important ties by source order. Staying last guarantees our
+       rules always take priority. appendChild on an existing node just moves
+       it, and we skip the call when already last, so no churn. */
+    if (document.head.lastElementChild !== style) {
+      document.head.appendChild(style);
+    }
+
+    /* (Re)attach the content guard whenever the tag instance changes. */
+    if (style !== styleEl) {
+      styleEl = style;
+      contentGuard.disconnect();
+      contentGuard.observe(style, {
+        childList: true,
+        characterData: true,
+        subtree: true
+      });
+    }
+  }
+
+  /* FIX: runs in the capture phase BEFORE the browser opens a dropdown
+     (mouse, keyboard, or focus). Re-asserts the stylesheet and forces a
+     synchronous style flush on the select, so the popup's very first paint
+     already uses the final themed colors — no dark-on-dark frame. Costs
+     nothing for non-select targets (single early return). */
+  function flushSelectStyles(e) {
+    const t = e.target;
+    const sel = t && typeof t.closest === 'function' ? t.closest('select') : null;
+    if (!sel) return;
+
+    upsertStyle();
+    void getComputedStyle(sel).color; /* forces the flush */
   }
 
   function init() {
@@ -175,13 +235,15 @@
       });
     }
 
-    /* FIX: if the app ever re-renders/cleans <head> and drops the injected
-       <style> tag, restore it immediately instead of waiting for the next
-       theme-class change. upsertStyle() is a no-op when the tag is intact,
-       so this can't loop. */
+    /* Re-inject the style tag if the app ever wipes/replaces <head> content,
+       and re-assert last position when new stylesheets are appended. */
     if (document.head) {
       observer.observe(document.head, { childList: true });
     }
+
+    document.addEventListener('mousedown', flushSelectStyles, true);
+    document.addEventListener('keydown', flushSelectStyles, true);
+    document.addEventListener('focusin', flushSelectStyles, true);
   }
 
   if (document.readyState === 'loading') {
