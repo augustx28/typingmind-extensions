@@ -101,17 +101,15 @@
       }
     }
 
-    /* 11) FIX — DARK MODE: native <select> dropdown lists.
-       The theme repaints the app's own surfaces, but the open list of a
-       native <select> is drawn by the browser using the select/option
-       colors, which nothing above ever sets. The options fell through
-       with low-contrast gray on a dark popup (nearly invisible).
-       This makes them readable and tells the browser to render the
-       popup itself as dark. Light mode is untouched. */
+    /* 11) FIX — DARK MODE: native <select> dropdowns.
+       Native <option> items don't inherit the app's dark styling, so when a
+       dropdown opens (e.g. "API Type" in Add Custom Model) the list items
+       were unreadable against the dark popup. Give the select's popup an
+       explicit dark palette with readable text. */
     html.dark select,
     body.dark select,
     .dark select {
-      color-scheme: dark !important;
+      color-scheme: dark;
     }
 
     html.dark select option,
@@ -124,11 +122,22 @@
       color: #dfdedb !important;
     }
 
-    /* Keep genuinely disabled options visually distinct */
+    /* Keep the hovered / currently-selected item clearly visible */
+    html.dark select option:hover,
+    body.dark select option:hover,
+    .dark select option:hover,
+    html.dark select option:checked,
+    body.dark select option:checked,
+    .dark select option:checked {
+      background-color: #2563eb !important;
+      color: #ffffff !important;
+    }
+
+    /* Disabled options: dimmed but still readable */
     html.dark select option:disabled,
     body.dark select option:disabled,
     .dark select option:disabled {
-      color: #8a8a8a !important;
+      color: rgba(223, 222, 219, 0.45) !important;
     }
   `;
 
@@ -141,8 +150,9 @@
       document.head.appendChild(style);
     }
 
-    /* FIX: only rewrite when the content actually changed, otherwise every
-       class flip on <html>/<body> forces a full style recalculation. */
+    /* FIX: only write when the content actually differs. The old version
+       reassigned the full stylesheet on every class change on <html>/<body>,
+       forcing a needless full style recalculation each time. */
     if (style.textContent !== css) {
       style.textContent = css;
     }
@@ -151,12 +161,12 @@
   function init() {
     upsertStyle();
 
+    const observer = new MutationObserver(upsertStyle);
+
     const watchTargets = [
       document.documentElement,
       document.body
     ].filter(Boolean);
-
-    const observer = new MutationObserver(upsertStyle);
 
     for (const t of watchTargets) {
       observer.observe(t, {
@@ -165,10 +175,13 @@
       });
     }
 
-    /* FIX: re-inject the style tag if the app ever re-renders <head> and
-       drops it (before, the theme would silently die until the next
-       light/dark toggle). Safe from loops thanks to the equality check. */
-    observer.observe(document.head, { childList: true });
+    /* FIX: if the app ever re-renders/cleans <head> and drops the injected
+       <style> tag, restore it immediately instead of waiting for the next
+       theme-class change. upsertStyle() is a no-op when the tag is intact,
+       so this can't loop. */
+    if (document.head) {
+      observer.observe(document.head, { childList: true });
+    }
   }
 
   if (document.readyState === 'loading') {
