@@ -47,7 +47,7 @@
   /* Constants                                                              */
   /* ===================================================================== */
 
-  const VERSION = "1.0.3";
+  const VERSION = "1.0.0";
   const TAG = "[TMDS]";
 
   const DB_NAME = "keyval-store";
@@ -209,10 +209,9 @@
   }
 
   /** Bounded-concurrency map. Never rejects; returns settled results. */
-  async function pool(items, limit, fn, onProgress) {
+  async function pool(items, limit, fn) {
     const results = new Array(items.length);
     let cursor = 0;
-    let done = 0;
     const width = Math.max(1, Math.min(limit, items.length));
     await Promise.all(
       Array.from({ length: width }, async () => {
@@ -222,10 +221,6 @@
             results[i] = { ok: true, value: await fn(items[i], i) };
           } catch (e) {
             results[i] = { ok: false, error: e };
-          }
-          done++;
-          if (onProgress && (done % 20 === 0 || done === items.length)) {
-            onProgress(done, items.length);
           }
         }
       })
@@ -1193,20 +1188,15 @@
         let pulled = 0;
         if (toPull.length) {
           this.emit("syncing", `Downloading ${toPull.length} item${toPull.length > 1 ? "s" : ""}…`);
-          const results = await pool(
-            toPull,
-            DOWNLOAD_CONCURRENCY,
-            async ([rkey, r]) => {
-              const sealed = await Drive.get(BLOB_PREFIX + r.h);
-              const plain = await Crypto.open(key, sealed);
-              await materialise(rkey, r.k, plain, r);
-              state.items[rkey] = { h: r.h, k: r.k, m: r.m, s: r.s, sig: null, mime: r.mime };
-              delete state.deleted[rkey];
-              delete state.pendingDel[rkey];
-              return rkey;
-            },
-            (done, total) => this.emit("syncing", `Downloading ${done} of ${total}…`)
-          );
+          const results = await pool(toPull, DOWNLOAD_CONCURRENCY, async ([rkey, r]) => {
+            const sealed = await Drive.get(BLOB_PREFIX + r.h);
+            const plain = await Crypto.open(key, sealed);
+            await materialise(rkey, r.k, plain, r);
+            state.items[rkey] = { h: r.h, k: r.k, m: r.m, s: r.s, sig: null, mime: r.mime };
+            delete state.deleted[rkey];
+            delete state.pendingDel[rkey];
+            return rkey;
+          });
           for (const res of results) {
             if (res.ok) pulled++;
             else log.warn("Download failed:", res.error.message);
@@ -1273,10 +1263,7 @@
         let pushed = 0;
         if (toPush.length) {
           this.emit("syncing", `Uploading ${toPush.length} item${toPush.length > 1 ? "s" : ""}…`);
-          const results = await pool(
-            toPush,
-            UPLOAD_CONCURRENCY,
-            async (lkey) => {
+          const results = await pool(toPush, UPLOAD_CONCURRENCY, async (lkey) => {
             const l = local.get(lkey);
             const name = BLOB_PREFIX + l.h;
             // Content addressing: if that exact content is already up there,
@@ -1295,9 +1282,7 @@
             }
             state.items[lkey] = { h: l.h, k: l.k, m: l.m, s: l.s, sig: l.sig, mime: l.mime };
             return lkey;
-            },
-            (done, total) => this.emit("syncing", `Uploading ${done} of ${total}…`)
-          );
+          });
           for (const res of results) {
             if (res.ok && res.value) pushed++;
             else if (!res.ok) log.warn("Upload failed:", res.error.message);
@@ -1808,10 +1793,6 @@
 .tmds-guide a{color:#6fa8ff}
 .tmds-link{background:none;border:none;color:#6fa8ff;font-size:11.5px;cursor:pointer;
   padding:0;font-family:inherit;text-decoration:underline}
-.tmds-diag{width:100%;margin-top:10px;min-height:120px;max-height:180px;padding:8px 10px;
-  border-radius:7px;border:1px solid #45454e;background:#17171b;color:#c8c8d0;
-  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;line-height:1.45;
-  white-space:pre;overflow:auto;resize:vertical}
 .tmds-hidden{display:none!important}
 @media (max-width:480px){
   #tmds-overlay{padding:8px;align-items:flex-end}
@@ -1850,20 +1831,10 @@
       );
       const svgClass = (refSvg?.getAttribute("class") || "w-4 h-4 flex-shrink-0").replace(/"/g, "");
       const spanClass = (refSpan?.getAttribute("class") || "").replace(/"/g, "");
-      // TypingMind puts "hyphens: auto; word-break: break-word" inline on its
-      // tab labels. That is what lets a label slightly too wide for a 58px tab
-      // wrap instead of spilling across its neighbour, so clone it rather than
-      // inventing our own.
-      const spanStyle = (refSpan?.getAttribute("style") || "word-break:break-word").replace(/"/g, "'");
-      const svgSize = refSvg
-        ? ["width", "height"]
-            .map((a) => (refSvg.getAttribute(a) ? ` ${a}="${refSvg.getAttribute(a)}"` : ""))
-            .join("")
-        : "";
 
       const html =
         `<div class="relative flex flex-shrink-0">` +
-        `<svg class="${svgClass}"${svgSize} viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
+        `<svg class="${svgClass}" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">` +
         `<g stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">` +
         `<path d="M10 4.5a5.5 5.5 0 0 1 5.24 3.83"/>` +
         `<path d="M10 15.5a5.5 5.5 0 0 1-5.24-3.83"/>` +
@@ -1871,7 +1842,7 @@
         `<polyline points="7.4,15.8 4.5,15.4 4.9,12.5"/>` +
         `</g></svg>` +
         `<div id="tmds-dot"></div></div>` +
-        (refSpan ? `<span class="${spanClass}" style="${spanStyle}">Sync</span>` : "");
+        (refSpan ? `<span class="${spanClass}" style="word-break:break-word">Sync</span>` : "");
 
       if (this.button.__html !== html) {
         this.button.innerHTML = html;
@@ -1883,98 +1854,48 @@
       if (refSpan) this.button.removeAttribute("data-tooltip-content");
       else this.button.setAttribute("data-tooltip-content", "Sync");
 
-      this.applyBarCompat();
-    },
+    }
 
     /**
-     * Touch nothing outside our own button.
+     * Compatibility shim for the TypingMind Tweaks extension.
      *
-     * Earlier versions injected CSS at the workspace bar to "fix" a label
-     * collision. That rested on a wrong reading of TypingMind's markup: its
-     * tab icons are bare <svg> children, not wrapped in a span, so the
-     * neighbouring extension was never mis-reading them. The collision has a
-     * different cause and belongs in that extension, not here. All this does
-     * now is clear a stylesheet an earlier version may have left behind.
+     * Tweaks styles its own label by copying the class list of the first
+     * <span> inside a neighbouring workspace tab. In TypingMind's markup that
+     * first span is the icon wrapper, not the text label, so the Tweaks label
+     * inherits icon layout and runs into the next tab's label
+     * ("TweaksSettings"). Tweaks reapplies that class on every DOM mutation,
+     * so repairing it in the DOM would start an endless fight between two
+     * observers -- a stylesheet wins quietly instead.
+     *
+     * Values are read from the real label next door, so this keeps working if
+     * TypingMind changes its type scale. Nothing is written unless a Tweaks
+     * button is actually present.
      */
-    applyBarCompat() {
-      document.getElementById("tmds-compat")?.remove();
-    },
-
-    /**
-     * Dumps the real measurements of the workspace bar. Layout problems here
-     * depend on markup I can't see from the outside, and guessing at it has
-     * not gone well -- this reports what is actually there.
-     */
-    barReport() {
-      const bar = this.button?.parentElement;
-      if (!bar) return "No workspace bar found.";
-      const out = [];
-      const cs = getComputedStyle(bar);
-      out.push(`TypingMind Drive Sync ${VERSION} - workspace bar layout`);
-      out.push(`viewport ${window.innerWidth}x${window.innerHeight} dpr=${window.devicePixelRatio}`);
-      out.push("");
-      out.push(`BAR <${bar.tagName.toLowerCase()}> id="${bar.getAttribute("data-element-id") || ""}"`);
-      out.push(`  class="${bar.className}"`);
-      out.push(
-        `  display=${cs.display} dir=${cs.flexDirection} wrap=${cs.flexWrap} ` +
-          `gap=${cs.gap} justify=${cs.justifyContent} align=${cs.alignItems}`
-      );
-      out.push(
-        `  overflowX=${cs.overflowX} clientW=${bar.clientWidth} scrollW=${bar.scrollWidth} ` +
-          `padding=${cs.paddingLeft}/${cs.paddingRight}`
-      );
-
-      for (const el of Array.from(bar.children)) {
-        const id = el.getAttribute("data-element-id") || el.id || `<${el.tagName.toLowerCase()}>`;
-        const e = getComputedStyle(el);
-        const box = el.getBoundingClientRect();
-        out.push("");
-        out.push(`TAB ${id}`);
-        out.push(
-          `  x=${Math.round(box.left)} w=${Math.round(box.width)} ` +
-            `flex=${e.flex} minW=${e.minWidth} display=${e.display} ` +
-            `pad=${e.paddingLeft}/${e.paddingRight} margin=${e.marginLeft}/${e.marginRight}`
+    applyTweaksCompat() {
+      const tweaks = document.getElementById("workspace-tab-tweaks");
+      if (!tweaks) return;
+      const tpl = this.templateButton();
+      const nativeLabel =
+        tpl &&
+        Array.from(tpl.querySelectorAll("span")).find(
+          (el) => el.textContent && el.textContent.trim()
         );
-        out.push(`  class="${el.className}"`);
-        out.push(`  html=${el.innerHTML.replace(/\s+/g, " ").trim().slice(0, 240)}`);
-        for (const child of Array.from(el.querySelectorAll("span,div"))) {
-          const text = (child.textContent || "").trim();
-          if (!text || child.querySelector("svg,img")) continue;
-          const c = getComputedStyle(child);
-          const cb = child.getBoundingClientRect();
-          out.push(
-            `  LABEL "${text}" x=${Math.round(cb.left)} w=${Math.round(cb.width)} ` +
-              `display=${c.display} font=${c.fontSize}/${c.lineHeight} ` +
-              `alignSelf=${c.alignSelf} maxW=${c.maxWidth} overflow=${c.overflow} ` +
-              `whiteSpace=${c.whiteSpace} pos=${c.position}`
-          );
-          out.push(`    labelClass="${child.className}"`);
-        }
+      if (!nativeLabel) return;
+      const cs = getComputedStyle(nativeLabel);
+      if (!cs || !cs.fontSize) return;
+      const css =
+        "#workspace-tab-tweaks > span{" +
+        `display:${cs.display};font-size:${cs.fontSize};line-height:${cs.lineHeight};` +
+        `font-weight:${cs.fontWeight};text-align:${cs.textAlign};align-self:${cs.alignSelf};` +
+        `letter-spacing:${cs.letterSpacing};min-width:0;max-width:100%;` +
+        "overflow-wrap:anywhere}";
+      let el = document.getElementById("tmds-compat");
+      if (!el) {
+        el = document.createElement("style");
+        el.id = "tmds-compat";
+        document.head.appendChild(el);
       }
-      return out.join("\n");
-    },
-
-    /**
-     * Other extensions add their tabs whenever they get around to it, usually
-     * after we mount. Watch the bar so the Tweaks repair applies as soon as its
-     * button appears, rather than only when TypingMind repaints Settings.
-     */
-    watchBar() {
-      const bar = this.button?.parentElement;
-      if (!bar || this._barObserver) return;
-      this._barObserver = new MutationObserver(() => {
-        if (this._barPending) return;
-        this._barPending = true;
-        requestAnimationFrame(() => {
-          this._barPending = false;
-          this.applyBarCompat();
-        });
-      });
-      this._barObserver.observe(bar, { childList: true, subtree: true });
-      // Belt and braces for extensions that mount on a long timer.
-      for (const delay of [500, 1500, 4000]) {
-        setTimeout(() => this.applyBarCompat(), delay);
-      }
+      if (el.textContent !== css) el.textContent = css;
     },
 
     mount() {
@@ -2007,9 +1928,6 @@
       else anchor.parentNode.insertBefore(btn, anchor.nextSibling);
 
       this.watchTemplate();
-      this.applyBarCompat();
-      this.watchBar();
-      return true;
     },
 
     watchTemplate() {
@@ -2186,15 +2104,6 @@
       </div>
     </div>
 
-    <div class="tmds-card">
-      <h3>Sidebar layout</h3>
-      <p class="tmds-note">If the tab labels in the sidebar look wrong, this copies the exact measurements so they can be diagnosed instead of guessed at. Nothing personal is included &mdash; only tab names and sizes.</p>
-      <div class="tmds-btnrow">
-        <button class="tmds-btn tmds-btn-ghost tmds-btn-sm" id="tmds-diag">Copy bar layout</button>
-      </div>
-      <textarea class="tmds-diag tmds-hidden" id="tmds-diag-out" readonly spellcheck="false"></textarea>
-    </div>
-
   </div>
   <div class="tmds-foot">
     <button class="tmds-btn tmds-btn-ghost" id="tmds-close">Close</button>
@@ -2369,24 +2278,6 @@
           Engine.emit("ok", freed ? `Removed ${freed} unused files.` : "Nothing to clean up.");
         });
 
-      $("tmds-diag").onclick = async (e) => {
-        const box = $("tmds-diag-out");
-        const report = this.barReport();
-        box.value = report;
-        box.classList.remove("tmds-hidden");
-        let copied = false;
-        try {
-          await navigator.clipboard.writeText(report);
-          copied = true;
-        } catch {
-          // Clipboard access is often blocked; selecting the text is enough.
-          box.focus();
-          box.select();
-        }
-        e.target.textContent = copied ? "Copied" : "Select and copy above";
-        setTimeout(() => (e.target.textContent = "Copy bar layout"), 2500);
-      };
-
       if (Drive.signedIn()) this.loadSnapshots();
     },
 
@@ -2541,6 +2432,5 @@
       return "Local sync index cleared. The next sync rebuilds it from Drive.";
     },
     open: () => UI.open(),
-    barReport: () => UI.barReport(),
   };
 })();
