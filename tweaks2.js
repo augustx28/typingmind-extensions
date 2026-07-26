@@ -1156,7 +1156,14 @@
       showFeedback("Favicon cleared. Default restored.", 2500);
     });
 
-    scrollableContent.append(settingsSection, chatColorsSection, globalFontSettingsSection, fontSettingsContainer, faviconSettingsSection);
+    // --- Diagnostics ---
+    const diagSection = document.createElement("div");
+    diagSection.className = "tweak-settings-section";
+    diagSection.innerHTML = `<h3>Diagnostics</h3>
+      <p class="tweak-section-note">What is actually running, and how this tab measures against a native one.</p>
+      <pre id="tweak-diagnostics" style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.72em;line-height:1.55;color:#cfcfcf;background:#17181b;border:1px solid #3d3e43;border-radius:8px;padding:10px 11px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"></pre>`;
+
+    scrollableContent.append(settingsSection, chatColorsSection, globalFontSettingsSection, fontSettingsContainer, faviconSettingsSection, diagSection);
 
     const footer = document.createElement("div");
     footer.className = "tweak-modal-footer";
@@ -1385,6 +1392,7 @@
     updateChatColorPreview();
     updateFontFileStatus();
     renderChatFontFileList();
+    refreshDiagnostics();
   }
 
   function loadSettingsIntoModal() {
@@ -1450,6 +1458,7 @@
     }
     if (clearFaviconButtonElModal) clearFaviconButtonElModal.style.display = hasFavicon ? "inline-block" : "none";
     if (feedbackElement) feedbackElement.textContent = "\u00A0";
+    refreshDiagnostics();
   }
 
   function saveSetting(key, value) {
@@ -1664,6 +1673,23 @@
     }
   }
 
+  // Some containers size tabs with flex rather than content width. Mirror the
+  // reference tab's box properties live (not as a frozen snapshot) so our tab
+  // occupies an identical slot however the bar is laid out.
+  function syncTabGeometry(btn, reference) {
+    const rs = window.getComputedStyle(reference);
+    const props = [
+      "flexGrow", "flexShrink", "flexBasis",
+      "marginLeft", "marginRight",
+      "paddingLeft", "paddingRight",
+      "minWidth", "maxWidth", "alignSelf", "boxSizing",
+    ];
+    props.forEach((p) => {
+      const v = rs[p];
+      if (v && btn.style[p] !== v) btn.style[p] = v;
+    });
+  }
+
   function syncTweaksButton() {
     const workspaceBar = document.querySelector('div[data-element-id="workspace-bar"]');
     if (!workspaceBar) return;
@@ -1699,10 +1725,49 @@
       btn = fresh;
     }
 
+    syncTabGeometry(btn, reference);
+
     const svg = btn.querySelector("svg");
     if (svg) {
       svg.style.color = getSetting(settingsKeys.workspaceIconColor, defaultWorkspaceIconColorVisual);
     }
+  }
+
+  // Reports what is actually running and how the tab measures up against a
+  // native one. Screenshot this if the tab still looks wrong.
+  function refreshDiagnostics() {
+    const el = document.getElementById("tweak-diagnostics");
+    if (!el) return;
+    const bar = document.querySelector('div[data-element-id="workspace-bar"]');
+    const ref = bar ? getReferenceButton(bar) : null;
+    const me = document.getElementById(TWEAKS_TAB_ID);
+    const orphan = document.getElementById("workspace-tab-tweaks");
+    const box = (n) => {
+      if (!n) return "-";
+      const r = n.getBoundingClientRect();
+      const s = window.getComputedStyle(n);
+      return `w${Math.round(r.width)} x${Math.round(r.left)} ` +
+        `flex:${s.flexGrow}/${s.flexShrink}/${s.flexBasis} ` +
+        `m:${s.marginLeft}|${s.marginRight} p:${s.paddingLeft}|${s.paddingRight}`;
+    };
+    const labelClass = (n) => {
+      if (!n) return "-";
+      const l = tabLabelSpan(n);
+      return l ? (l.className || "(no class)") : "(no label span)";
+    };
+    el.textContent = [
+      `tweaks    v${TWEAKS_VERSION}`,
+      `sync      ${window.tmDriveSync ? "v" + window.tmDriveSync.version : "not loaded"}`,
+      `compat    ${document.getElementById("tmds-compat") ? "PRESENT" : "absent"}`,
+      `old tab   ${orphan ? "PRESENT" : "absent"}`,
+      `ref       ${ref ? ref.dataset.elementId : "none"}`,
+      `ref box   ${box(ref)}`,
+      `my box    ${box(me)}`,
+      `ref label ${labelClass(ref)}`,
+      `my label  ${labelClass(me)}`,
+      `ref class ${ref ? ref.className : "-"}`,
+      `my class  ${me ? me.className : "-"}`,
+    ].join("\n");
   }
 
   // ---------------------------------------------------------------
@@ -1893,6 +1958,9 @@
     applyGlobalUiFont();
     applyCustomFavicon();
     setupFaviconObserver();
+    ["resize", "orientationchange"].forEach((evt) =>
+      window.addEventListener(evt, () => requestAnimationFrame(syncAll))
+    );
   }
 
   let syncScheduled = false;
