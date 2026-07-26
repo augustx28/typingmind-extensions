@@ -1695,10 +1695,18 @@
     /* --- sidebar button --------------------------------------------------- */
 
     templateButton() {
-      return (
-        document.querySelector('button[data-element-id="workspace-tab-settings"]') ||
-        document.querySelector('button[data-element-id="workspace-tab-chat"]')
+      const workspaceBar =
+        document.querySelector('div[data-element-id="workspace-bar"]') || document;
+      const isActive = (button) =>
+        /(^|\s)bg-white\/20(\s|$)/.test(button.className);
+      const tabs = Array.from(
+        workspaceBar.querySelectorAll('button[data-element-id^="workspace-tab-"]')
+      ).filter((button) =>
+        button.dataset.elementId !== "workspace-tab-drivesync" &&
+        button.dataset.elementId !== "workspace-tab-tweaks" &&
+        button.offsetParent !== null
       );
+      return tabs.find((button) => !isActive(button)) || tabs[0] || null;
     },
 
     injectStyles() {
@@ -1857,46 +1865,8 @@
       this.applyTweaksCompat();
     },
 
-    /**
-     * Compatibility shim for the TypingMind Tweaks extension.
-     *
-     * Tweaks styles its own label by copying the class list of the first
-     * <span> inside a neighbouring workspace tab. In TypingMind's markup that
-     * first span is the icon wrapper, not the text label, so the Tweaks label
-     * inherits icon layout and runs into the next tab's label
-     * ("TweaksSettings"). Tweaks reapplies that class on every DOM mutation,
-     * so repairing it in the DOM would start an endless fight between two
-     * observers -- a stylesheet wins quietly instead.
-     *
-     * Values are read from the real label next door, so this keeps working if
-     * TypingMind changes its type scale. Nothing is written unless a Tweaks
-     * button is actually present.
-     */
     applyTweaksCompat() {
-      const tweaks = document.getElementById("workspace-tab-tweaks");
-      if (!tweaks) return;
-      const tpl = this.templateButton();
-      const nativeLabel =
-        tpl &&
-        Array.from(tpl.querySelectorAll("span")).find(
-          (el) => el.textContent && el.textContent.trim()
-        );
-      if (!nativeLabel) return;
-      const cs = getComputedStyle(nativeLabel);
-      if (!cs || !cs.fontSize) return;
-      const css =
-        "#workspace-tab-tweaks > span{" +
-        `display:${cs.display};font-size:${cs.fontSize};line-height:${cs.lineHeight};` +
-        `font-weight:${cs.fontWeight};text-align:${cs.textAlign};align-self:${cs.alignSelf};` +
-        `letter-spacing:${cs.letterSpacing};min-width:0;max-width:100%;` +
-        "overflow-wrap:anywhere}";
-      let el = document.getElementById("tmds-compat");
-      if (!el) {
-        el = document.createElement("style");
-        el.id = "tmds-compat";
-        document.head.appendChild(el);
-      }
-      if (el.textContent !== css) el.textContent = css;
+      document.getElementById("tmds-compat")?.remove();
     },
 
     mount() {
