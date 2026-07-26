@@ -1854,7 +1854,8 @@
       if (refSpan) this.button.removeAttribute("data-tooltip-content");
       else this.button.setAttribute("data-tooltip-content", "Sync");
 
-    }
+      this.applyTweaksCompat();
+    },
 
     /**
      * Compatibility shim for the TypingMind Tweaks extension.
@@ -1928,6 +1929,8 @@
       else anchor.parentNode.insertBefore(btn, anchor.nextSibling);
 
       this.watchTemplate();
+      this.applyTweaksCompat();
+      return true;
     },
 
     watchTemplate() {
