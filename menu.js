@@ -79,97 +79,34 @@
     /* =========================================
        4. Mobile Media Queries
        ========================================= */
+    /* NOTE: every rule removed from this section targeted a workspace tab by
+       its child index (:nth-child(8), (10), (11)) and nudged it with
+       position/left/width. Those indices only hold for one exact number of
+       tabs -- installing or removing an extension that adds a tab shifts every
+       later index by one, so the offsets land on the wrong tab and it overlaps
+       its neighbour. Anything index-independent is kept below. If a tab needs
+       nudging again, target it by [data-element-id="workspace-tab-..."], which
+       does not move when the tab count changes. */
 
-    /* Max-width: 741px (NEW) */
-    @media (max-width: 741px) {
-      /* Button reset transform */
-      .overflow-x-auto .justify-start .md\\:flex-none:nth-child(11) {
-        transform: translatex(0px) translatey(0px);
-      }
-    }
-
-    /* Max-width: 585.991px (NEW) */
+    /* Max-width: 585.991px */
     @media (max-width: 585.991px) {
       /* Span Tag positioning */
       .overflow-x-auto .justify-center .md\\:leading-none {
         position: relative;
         top: 2px;
       }
-      
-      /* Button positioning */
-      .overflow-x-auto .justify-start .md\\:flex-none:nth-child(11) {
-        position: relative;
-        left: 5px;
-      }
     }
 
-    /* Max-width: 499.995px (Existing) */
+    /* Max-width: 499.995px */
     @media (max-width: 499.995px) {
-      /* Justify center adjustments */
-      .sm\\:block .justify-start:nth-child(1) .justify-center:nth-child(10) > .justify-center:nth-child(1) {
-        padding-left: 2px;
-        padding-right: 2px;
-        margin-right: 5px;
-      }
-      
-      .overflow-x-auto .justify-start:nth-child(1) .justify-center:nth-child(10) > .justify-center:nth-child(1) {
-        height: 48px;
-        padding-top: 6px;
-        padding-bottom: 6px;
-        margin-top: -1px;
-        position: relative;
-        left: 3px;
-      }
-      
       /* Text white margins */
       .overflow-x-auto .justify-start .text-white {
         margin-left: 2px;
         margin-right: 2px;
       }
-      
-      /* Button positioning (Legacy) */
-      .overflow-x-auto .justify-start .md\\:flex-none:nth-child(11) {
-        position: relative;
-        left: 5px;
-      }
-      
-      /* Custom theme nav handler width */
-      #__next .custom-theme #nav-handler .h-\\[--workspace-height\\] .justify-between .overflow-x-auto .justify-start:nth-child(1) .justify-center:nth-child(10) > .justify-center:nth-child(1) {
-        width: 57px;
-      }
     }
 
-    /* Max-width: 499px (Combined) */
-    @media (max-width: 499px) {
-      /* Text white absolute left */
-      .overflow-x-auto .justify-start .text-white {
-        left: 11px !important;
-      }
-      
-      /* Button margins */
-      .overflow-x-auto .justify-start .md\\:flex-none:nth-child(8) {
-        margin-left: 0px;
-        margin-right: 0px;
-      }
-      
-      /* Center positioning */
-      .overflow-x-auto .justify-start:nth-child(1) .justify-center:nth-child(10) > .justify-center:nth-child(1) {
-        left: 9px;
-        top: 1px; /* Overridden to -1px below if specificity matches, kept original here */
-      }
-
-      /* NEW: Button left adjust */
-      .overflow-x-auto .justify-start .md\\:flex-none:nth-child(11) {
-        left: 15px; /* Updated from 13px */
-      }
-
-      /* NEW: Top adjustment for center element */
-      .overflow-x-auto .justify-start:nth-child(1) .justify-center:nth-child(10) > .justify-center:nth-child(1) {
-        top: -1px;
-      }
-    }
-
-    /* Max-width: 498.991px (NEW) */
+    /* Max-width: 498.991px */
     @media (max-width: 498.991px) {
       /* Force reset transform on deep nested justify-start */
       #__next .custom-theme #nav-handler .md\\:pl-\\[--current-sidebar-width\\] .overflow-y-auto .resize-container .flex-col .custom-scrollbar .dynamic-chat-content-container .antialiased .justify-start .justify-start:nth-child(1) .justify-start {
