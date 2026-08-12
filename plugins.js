@@ -235,18 +235,25 @@
   width:auto !important;
 }
 
+/* Zero vertical padding and no min-height, so the handle can never make a row
+   taller than TypingMind already draws it. align-self:stretch means the handle
+   is exactly as tall as the row. The tap target is widened with a transparent
+   ::after pad, which hit-tests as the handle but costs no layout space. */
 .tm-handle{
+  position:relative;
   cursor:grab;
   display:flex;
   align-items:center;
   justify-content:center;
   flex:0 0 auto;
   align-self:stretch;
-  min-width:26px;
-  padding:6px 6px 6px 0;
-  margin-right:2px;
+  min-width:0;
+  min-height:0;
+  padding:0 7px 0 0;
+  margin:0;
   color:#94a3b8;
-  opacity:.65;
+  opacity:.7;
+  line-height:0;
   touch-action:none;
   -webkit-user-select:none;
   user-select:none;
@@ -254,17 +261,20 @@
   -webkit-tap-highlight-color:transparent;
   transition:opacity .12s ease,color .12s ease;
 }
+.tm-handle svg{display:block;flex:0 0 auto;}
+.tm-handle::after{content:'';position:absolute;inset:-2px -4px -2px -8px;}
 .tm-handle:hover{opacity:1;}
 .tm-handle:active{color:#3b82f6;opacity:1;cursor:grabbing;}
 @media (pointer:coarse){
-  .tm-handle{min-width:40px;min-height:44px;padding:8px 8px 8px 2px;opacity:.85;}
+  .tm-handle{padding:0 9px 0 1px;opacity:.85;}
+  .tm-handle::after{inset:-5px -7px -5px -10px;}
 }
 
 .tm-ph{
   background:rgba(59,130,246,.07);
   border:1px dashed rgba(59,130,246,.45);
   border-radius:8px;
-  margin:2px 0;
+  margin:0;
   flex:0 0 auto;
   box-sizing:border-box;
   pointer-events:none;
@@ -305,6 +315,17 @@ html.tm-drag-on .tm-handle{cursor:grabbing;}
         /* --- discovery --- */
 
         scan() {
+            // a placeholder orphaned by a killed drag looks exactly like a
+            // mystery gap between rows, so sweep any strays
+            if (!this.drag) {
+                document.querySelectorAll('.tm-ph').forEach(el => el.remove());
+                document.querySelectorAll('.tm-dragging').forEach(el => {
+                    el.classList.remove('tm-dragging');
+                    ['transform','top','left','--tm-bg','--tm-w'].forEach(k => el.style.removeProperty(k));
+                });
+                document.documentElement.classList.remove('tm-drag-on');
+            }
+
             const rows = document.querySelectorAll(CFG.sel.row);
             const lists = new Set();
             rows.forEach(r => {
@@ -357,7 +378,7 @@ html.tm-drag-on .tm-handle{cursor:grabbing;}
 
         addHandles(list) {
             rowsOf(list).forEach(row => {
-                if (row.querySelector(':scope > * > .tm-handle') || row.querySelector('.tm-handle')) return;
+                if (row.querySelector('.tm-handle')) return;
                 const wrap = row.firstElementChild;
                 if (!wrap) return;
                 const h = document.createElement('div');
@@ -374,12 +395,11 @@ html.tm-drag-on .tm-handle{cursor:grabbing;}
         applyOrder(list) {
             if (this.drag || !list.isConnected) return;
 
-            // runaway guard: if React keeps fighting us, back off briefly
-            const t = this.throttle.get(list) || { n: 0, at: 0 };
+            // runaway guard: if React keeps re-rendering and fighting us, pause
             const now = Date.now();
+            const t = this.throttle.get(list) || { n: 0, at: now, until: 0 };
+            if (now < t.until) return;
             if (now - t.at > 3000) { t.n = 0; t.at = now; }
-            if (++t.n > 8) { this.throttle.set(list, { n: 0, at: now + 4000 }); return; }
-            this.throttle.set(list, t);
 
             const rows = rowsOf(list);
             if (rows.length < 2) return;
@@ -399,6 +419,12 @@ html.tm-drag-on .tm-handle{cursor:grabbing;}
             let same = true;
             for (let i = 0; i < rows.length; i++) if (rows[i] !== want[i]) { same = false; break; }
             if (same) return;
+
+            // only a genuine reorder counts toward the runaway guard
+            t.n++;
+            if (t.n > 8) { t.until = now + 5000; t.n = 0; t.at = now; }
+            this.throttle.set(list, t);
+            if (t.until > now) return;
 
             const tail = rows[rows.length - 1].nextSibling;  // keep trailing UI in place
             this.applying.add(list);
@@ -452,9 +478,12 @@ html.tm-drag-on .tm-handle{cursor:grabbing;}
             const list = row.parentElement;
             const rect = row.getBoundingClientRect();
 
+            const rowCS = getComputedStyle(row);
             const ph = document.createElement('div');
             ph.className = 'tm-ph';
             ph.style.height = rect.height + 'px';
+            ph.style.marginTop = rowCS.marginTop;       // match the row exactly
+            ph.style.marginBottom = rowCS.marginBottom; // so nothing shifts
             row.before(ph);
 
             let bg = getComputedStyle(row).backgroundColor;
@@ -598,9 +627,9 @@ html.tm-drag-on .tm-handle{cursor:grabbing;}
             // A HeadlessUI popover closes when focus escapes it. Put it back.
             requestAnimationFrame(() => {
                 const active = document.activeElement;
-                if (!active || active === document.body) {
-                    try { (row.focus ? row : p && p.wasFocused)?.focus({ preventScroll: true }); } catch (_) {}
-                }
+                if (active && active !== document.body) return;
+                const target = row.isConnected ? row : (p && p.wasFocused);
+                try { if (target && target.isConnected) target.focus({ preventScroll: true }); } catch (_) {}
             });
 
             shieldClicks();
@@ -613,9 +642,12 @@ html.tm-drag-on .tm-handle{cursor:grabbing;}
     class StateKeeper {
         constructor() {
             this.busy = false;
+            this.timer = null;
             this.sweep();
-            new MutationObserver(() => this.sweep())
-                .observe(document.body, { childList: true, subtree: true });
+            new MutationObserver(() => {
+                clearTimeout(this.timer);
+                this.timer = setTimeout(() => this.sweep(), 100);
+            }).observe(document.body, { childList: true, subtree: true });
         }
 
         sweep() {
