@@ -1,398 +1,667 @@
 /* ============================================================================
- * TypingMind – Mobile-Ready Plugin Sorter (V7: Persistent Order Fix)
+ * TypingMind - Plugin Sorter  (V8)
+ * ----------------------------------------------------------------------------
+ * Drag to reorder plugins in the plugin menu. Built touch-first.
+ *
+ * FIXED vs V7
+ *  1. Menu closing mid-drag on phone
+ *     - Every drag event is handled in the CAPTURE phase and stopped there, so
+ *       HeadlessUI never sees the pointer sliding across its menu items.
+ *     - The synthetic "click" that fires when you lift your finger is
+ *       swallowed, so letting go on top of another row can't select it.
+ *     - Focus is restored after the drop instead of dropping to <body>
+ *       (focus loss is what closes a HeadlessUI popover).
+ *     - Removed body{overflow:hidden}; it caused iOS scroll jumps. Page scroll
+ *       is now blocked with a passive:false touchmove during the drag only.
+ *  2. Order not sticking
+ *     - Saved per group instead of one shared global array.
+ *     - Saving MERGES into the stored list, so rows hidden by search keep
+ *       their slots instead of getting shoved to the end.
+ *     - Initial DOM sweep + 2s watchdog catch lists that were already on
+ *       screen or that React re-rendered behind the observer's back.
+ *     - Order is re-applied whenever TypingMind rebuilds a list.
+ *     - Your existing V5/V7 order is migrated on first run.
+ *  3. Smoothness
+ *     - GPU transform instead of top/left writes.
+ *     - Sorting + autoscroll run once per frame, not per pointermove.
+ *     - 5px threshold so a tap on the handle isn't a micro-drag.
+ *     - 44px touch target, haptic tick, reduced-motion aware.
+ *
+ * Console helpers: tmSorter.dump() / tmSorter.apply() / tmSorter.reset()
  * ========================================================================== */
 (() => {
-    const CONFIG = {
-        key_order: 'tm_plugin_sort_v5_order',
-        key_state: 'tm_plugin_sort_v5_toggles',
-        selectors: {
+    'use strict';
+
+    if (window.__tmSorterV8) return;
+    window.__tmSorterV8 = true;
+
+    const CFG = {
+        keyOrder:  'tm_plugin_sort_v8',
+        keyLegacy: 'tm_plugin_sort_v5_order',
+        keyState:  'tm_plugin_sort_v5_toggles',
+        sel: {
             header: 'button[id^="headlessui-disclosure-button"]',
-            row: '[role="menuitem"]',
-            name: '.truncate',
-            requiredElement: '[role="switch"]'
+            row:    '[role="menuitem"]',
+            name:   '.truncate',
+            switch: '[role="switch"]'
+        },
+        threshold:   5,     // px before a press becomes a drag
+        sweepMs:     2000,  // watchdog re-scan
+        settleMs:    90,    // debounce after TypingMind mutates a list
+        clickShield: 450,   // how long to swallow the post-drop click
+        maxSpeed:    14     // autoscroll px/frame at the edge
+    };
+
+    /* ---------------------------------------------------------------- store */
+
+    const Store = {
+        read(key, fallback) {
+            try {
+                const raw = localStorage.getItem(key);
+                return raw ? JSON.parse(raw) : fallback;
+            } catch (e) { return fallback; }
+        },
+        write(key, val) {
+            try { localStorage.setItem(key, JSON.stringify(val)); return true; }
+            catch (e) { console.warn('[tm-sorter] could not save:', e); return false; }
         }
     };
 
-    /* --- STORAGE HELPER --- */
-    class Store {
-        constructor(key) { this.key = key; }
-        get() { try { return JSON.parse(localStorage.getItem(this.key)) || {}; } catch(e){ return {}; } }
-        save(data) { localStorage.setItem(this.key, JSON.stringify(data)); }
-    }
-
-    /* --- MODULE 1: FOLDER STATE KEEPER --- */
-    class StateKeeper {
+    class OrderBook {
         constructor() {
-            this.store = new Store(CONFIG.key_state);
-            this.observe();
-        }
-
-        observe() {
-            const observer = new MutationObserver((mutations) => {
-                mutations.forEach((m) => {
-                    m.addedNodes.forEach((n) => {
-                        if (n.nodeType === 1) {
-                            const headers = n.querySelectorAll ? n.querySelectorAll(CONFIG.selectors.header) : [];
-                            headers.forEach(h => this.initHeader(h));
-                        }
-                    });
-                });
-            });
-            observer.observe(document.body, { childList: true, subtree: true });
-        }
-
-        initHeader(header) {
-            if (header.dataset.tmStateInit) return;
-            header.dataset.tmStateInit = 'true';
-
-            const title = header.textContent.trim();
-            if (!title) return;
-
-            const savedState = this.store.get()[title];
-            const isOpen = header.getAttribute('aria-expanded') === 'true';
-
-            if (savedState !== undefined && savedState !== isOpen) {
-                header.click();
+            let data = Store.read(CFG.keyOrder, null);
+            if (!data) {
+                const legacy = Store.read(CFG.keyLegacy, null);
+                data = { groups: {}, legacy: (legacy && legacy.order) || [] };
+                Store.write(CFG.keyOrder, data);
             }
+            data.groups = data.groups || {};
+            data.legacy = data.legacy || [];
+            this.data = data;
+        }
 
-            header.addEventListener('click', () => {
-                setTimeout(() => {
-                    const newState = header.getAttribute('aria-expanded') === 'true';
-                    const allStates = this.store.get();
-                    allStates[title] = newState;
-                    this.store.save(allStates);
-                }, 50);
-            });
+        get(key) {
+            // always read fresh so a second tab can't clobber us
+            const d = Store.read(CFG.keyOrder, this.data) || this.data;
+            d.groups = d.groups || {};
+            d.legacy = d.legacy || [];
+            this.data = d;
+            const own = d.groups[key];
+            return (own && own.length) ? own : d.legacy;
+        }
+
+        set(key, names) {
+            const d = Store.read(CFG.keyOrder, this.data) || this.data;
+            d.groups = d.groups || {};
+            d.legacy = d.legacy || [];
+            d.groups[key] = names;
+            this.data = d;
+            Store.write(CFG.keyOrder, d);
+        }
+
+        wipe() {
+            this.data = { groups: {}, legacy: [] };
+            Store.write(CFG.keyOrder, this.data);
         }
     }
 
-    /* --- MODULE 2: DRAG & DROP SORTER --- */
-    class PluginSorter {
+    /* ---------------------------------------------------------------- utils */
+
+    const normTitle = (t) => (t || '')
+        .replace(/\s+/g, ' ')
+        .replace(/\(\s*\d+\s*\)/g, '')   // strip "(12)" style counters
+        .trim()
+        .toLowerCase();
+
+    function rowName(row) {
+        const nodes = row.querySelectorAll(CFG.sel.name);
+        for (const n of nodes) {
+            if (n.closest('.tm-handle')) continue;
+            const t = n.textContent.trim();
+            if (t) return t;
+        }
+        const fb = row.textContent.trim();
+        return fb ? fb.slice(0, 90) : null;
+    }
+
+    function rowsOf(list) {
+        return Array.from(list.children).filter(
+            el => el.matches && el.matches(CFG.sel.row) && el.querySelector(CFG.sel.switch)
+        );
+    }
+
+    // Group key = the disclosure header this list sits under, else "root".
+    function listKey(list) {
+        let node = list;
+        for (let i = 0; node && node !== document.body && i < 8; i++) {
+            const prev = node.previousElementSibling;
+            if (prev && prev.matches && prev.matches(CFG.sel.header)) {
+                return 'g:' + normTitle(prev.textContent);
+            }
+            if (prev) {
+                const inner = prev.querySelector && prev.querySelector(CFG.sel.header);
+                if (inner) return 'g:' + normTitle(inner.textContent);
+            }
+            node = node.parentElement;
+        }
+        return 'root';
+    }
+
+    function findScroller(el) {
+        let n = el;
+        while (n && n !== document.body && n !== document.documentElement) {
+            const s = getComputedStyle(n);
+            if (/(auto|scroll|overlay)/.test(s.overflowY) && n.scrollHeight > n.clientHeight + 4) return n;
+            n = n.parentElement;
+        }
+        return document.scrollingElement || document.documentElement;
+    }
+
+    function scrollBox(sc) {
+        if (sc === document.scrollingElement || sc === document.documentElement || sc === document.body) {
+            return { top: 0, bottom: window.innerHeight, height: window.innerHeight };
+        }
+        const r = sc.getBoundingClientRect();
+        return { top: r.top, bottom: r.bottom, height: r.height };
+    }
+
+    // Reorder only the names that are currently visible; leave the rest parked
+    // in their existing slots. This is what stops search-filtered lists from
+    // scrambling the saved order.
+    function mergeOrder(saved, visibleInNewOrder) {
+        const visible = new Set(visibleInNewOrder);
+        const out = [];
+        let i = 0;
+        for (const name of saved) {
+            if (visible.has(name)) {
+                if (i < visibleInNewOrder.length) out.push(visibleInNewOrder[i++]);
+            } else {
+                out.push(name);
+            }
+        }
+        while (i < visibleInNewOrder.length) out.push(visibleInNewOrder[i++]);
+        return Array.from(new Set(out));
+    }
+
+    /* --------------------------------------------------------- click shield */
+
+    let shieldTimer = null;
+    function shieldClicks() {
+        const kill = (e) => { e.stopPropagation(); e.preventDefault(); };
+        const types = ['click', 'auxclick', 'contextmenu'];
+        types.forEach(t => document.addEventListener(t, kill, true));
+        clearTimeout(shieldTimer);
+        shieldTimer = setTimeout(() => {
+            types.forEach(t => document.removeEventListener(t, kill, true));
+        }, CFG.clickShield);
+    }
+
+    /* --------------------------------------------------------------- sorter */
+
+    class Sorter {
         constructor() {
-            this.orderStore = new Store(CONFIG.key_order);
+            this.book = new OrderBook();
+            this.pending = null;
             this.drag = null;
-            this._scrollRAF = null;
-            this._scrollSpeed = 0;
-            this._sortTimers = new WeakMap();   // per-list debounce timers
-            this.injectStyles();
-            this.startObserver();
+            this.applying = new WeakSet();
+            this.timers = new WeakMap();
+            this.throttle = new WeakMap();
+
+            this.injectCSS();
+            this.scan();
+            this.watchDOM();
+            setInterval(() => this.scan(), CFG.sweepMs);
+
+            // Re-check after tab wake / orientation change, both of which
+            // routinely leave the panel re-rendered and unsorted.
+            window.addEventListener('focus', () => this.scan());
+            window.addEventListener('orientationchange', () => setTimeout(() => this.scan(), 250));
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) this.scan();
+            });
         }
 
-        injectStyles() {
-            if (document.getElementById('tm-v6-css')) return;
-            const style = document.createElement('style');
-            style.id = 'tm-v6-css';
-            style.textContent = `
-                /* ALIGNMENT FIX */
-                [role="menuitem"] .flex.items-center.justify-center.gap-2.truncate {
-                    justify-content: flex-start !important;
-                    margin-right: auto !important;
-                    flex-grow: 0 !important;
-                    width: auto !important;
-                }
-                /* HANDLE */
-                .tm-handle {
-                    cursor: grab;
-                    padding: 4px 8px 4px 0px;
-                    touch-action: none;
-                    display: flex;
-                    align-items: center;
-                    color: #94a3b8;
-                    flex-shrink: 0;
-                    height: 100%;
-                    -webkit-user-select: none;
-                    user-select: none;
-                }
-                .tm-handle:active { color: #3b82f6; cursor: grabbing; }
+        /* --- styles --- */
+        injectCSS() {
+            if (document.getElementById('tm-sorter-v8-css')) return;
+            const s = document.createElement('style');
+            s.id = 'tm-sorter-v8-css';
+            s.textContent = `
+/* keep the plugin label hard-left so the handle has room */
+[role="menuitem"] .flex.items-center.justify-center.gap-2.truncate{
+  justify-content:flex-start !important;
+  margin-right:auto !important;
+  flex-grow:0 !important;
+  width:auto !important;
+}
 
-                /* DRAGGING VISUALS */
-                .tm-placeholder {
-                    background: rgba(59, 130, 246, 0.05);
-                    border: 1px dashed rgba(59, 130, 246, 0.4);
-                    border-radius: 8px;
-                    margin: 4px 0;
-                    flex-shrink: 0;
-                }
-                .tm-dragging {
-                    position: fixed !important;
-                    z-index: 9999 !important;
-                    opacity: 0.95;
-                    transform: scale(1.02);
-                    box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.4);
-                    width: var(--drag-width) !important;
-                    background: var(--drag-bg, #1e293b);
-                    pointer-events: none;
-                    border-radius: 8px;
-                    border: 1px solid rgba(255,255,255,0.1);
-                    will-change: top, left;
-                }
-                /* Kill body scroll while dragging on mobile */
-                body.tm-drag-active {
-                    overflow: hidden !important;
-                    touch-action: none !important;
-                }
-            `;
-            document.head.appendChild(style);
+.tm-handle{
+  cursor:grab;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  flex:0 0 auto;
+  align-self:stretch;
+  min-width:26px;
+  padding:6px 6px 6px 0;
+  margin-right:2px;
+  color:#94a3b8;
+  opacity:.65;
+  touch-action:none;
+  -webkit-user-select:none;
+  user-select:none;
+  -webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;
+  transition:opacity .12s ease,color .12s ease;
+}
+.tm-handle:hover{opacity:1;}
+.tm-handle:active{color:#3b82f6;opacity:1;cursor:grabbing;}
+@media (pointer:coarse){
+  .tm-handle{min-width:40px;min-height:44px;padding:8px 8px 8px 2px;opacity:.85;}
+}
+
+.tm-ph{
+  background:rgba(59,130,246,.07);
+  border:1px dashed rgba(59,130,246,.45);
+  border-radius:8px;
+  margin:2px 0;
+  flex:0 0 auto;
+  box-sizing:border-box;
+  pointer-events:none;
+}
+
+.tm-dragging{
+  position:fixed !important;
+  z-index:2147483000 !important;
+  margin:0 !important;
+  width:var(--tm-w) !important;
+  background:var(--tm-bg,#1f2937) !important;
+  border-radius:8px;
+  border:1px solid rgba(148,163,184,.25);
+  box-shadow:0 12px 28px -8px rgba(0,0,0,.55);
+  opacity:.97;
+  pointer-events:none !important;
+  touch-action:none !important;
+  will-change:transform;
+  transform:translate3d(0,0,0);
+}
+
+html.tm-drag-on,
+html.tm-drag-on *{
+  -webkit-user-select:none !important;
+  user-select:none !important;
+}
+html.tm-drag-on{cursor:grabbing;}
+html.tm-drag-on .tm-handle{cursor:grabbing;}
+
+@media (prefers-reduced-motion:reduce){
+  .tm-handle{transition:none;}
+  .tm-dragging{box-shadow:0 4px 10px -4px rgba(0,0,0,.5);}
+}
+`;
+            document.head.appendChild(s);
         }
 
-        startObserver() {
-            new MutationObserver((mutations) => {
-                mutations.forEach(m => {
-                    m.addedNodes.forEach(n => {
-                        if (n.nodeType !== 1) return;
+        /* --- discovery --- */
 
-                        const items = n.querySelectorAll ? n.querySelectorAll(CONFIG.selectors.row) : [];
-                        if (items.length === 0) return;
+        scan() {
+            const rows = document.querySelectorAll(CFG.sel.row);
+            const lists = new Set();
+            rows.forEach(r => {
+                if (r.querySelector(CFG.sel.switch) && r.parentElement) lists.add(r.parentElement);
+            });
+            lists.forEach(l => {
+                if (l.dataset.tmSort === '8') {
+                    this.addHandles(l);
+                    this.queueApply(l);
+                } else {
+                    this.initList(l);
+                }
+            });
+        }
 
-                        const lists = new Set();
-                        items.forEach(item => {
-                            if (item.querySelector(CONFIG.selectors.requiredElement)) {
-                                if (item.parentElement) lists.add(item.parentElement);
-                            }
-                        });
-
-                        lists.forEach(list => this.initList(list));
-                    });
-                });
+        watchDOM() {
+            new MutationObserver((muts) => {
+                if (this.drag) return;
+                let hit = false;
+                for (const m of muts) {
+                    for (const n of m.addedNodes) {
+                        if (n.nodeType !== 1) continue;
+                        if ((n.matches && n.matches(CFG.sel.row)) ||
+                            (n.querySelector && n.querySelector(CFG.sel.row))) { hit = true; break; }
+                    }
+                    if (hit) break;
+                }
+                if (hit) this.scan();
             }).observe(document.body, { childList: true, subtree: true });
         }
 
         initList(list) {
-            if (list.dataset.tmSortInit) return;
-            list.dataset.tmSortInit = 'true';
+            list.dataset.tmSort = '8';
+            this.addHandles(list);
+            this.applyOrder(list);
 
-            this.refreshHandles(list);
-            this.applySavedOrder(list);
-
-            // ── FIX: re-sort whenever TM adds/removes rows (debounced, skip during drag)
             new MutationObserver(() => {
-                this.refreshHandles(list);
-                this._debouncedSort(list);
+                if (this.drag) return;
+                if (this.applying.has(list)) return;
+                this.addHandles(list);
+                this.queueApply(list);
             }).observe(list, { childList: true });
         }
 
-        /* Debounced re-sort: waits 80ms for TM to finish rendering, skips if dragging */
-        _debouncedSort(list) {
-            if (this.drag) return;                       // never re-sort mid-drag
-            clearTimeout(this._sortTimers.get(list));
-            this._sortTimers.set(list, setTimeout(() => {
-                this.applySavedOrder(list);
-            }, 80));
+        queueApply(list) {
+            if (this.drag) return;
+            clearTimeout(this.timers.get(list));
+            this.timers.set(list, setTimeout(() => this.applyOrder(list), CFG.settleMs));
         }
 
-        refreshHandles(list) {
-            const rows = list.querySelectorAll(`:scope > ${CONFIG.selectors.row}`);
-            rows.forEach(row => {
-                if (!row.querySelector(CONFIG.selectors.requiredElement)) return;
-                this.addHandle(row);
+        addHandles(list) {
+            rowsOf(list).forEach(row => {
+                if (row.querySelector(':scope > * > .tm-handle') || row.querySelector('.tm-handle')) return;
+                const wrap = row.firstElementChild;
+                if (!wrap) return;
+                const h = document.createElement('div');
+                h.className = 'tm-handle';
+                h.setAttribute('aria-hidden', 'true');
+                h.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 6h.01M8 12h.01M8 18h.01M16 6h.01M16 12h.01M16 18h.01"/></svg>';
+                h.addEventListener('pointerdown', (e) => this.press(e, row));
+                wrap.prepend(h);
             });
         }
 
-        addHandle(row) {
-            if (row.querySelector('.tm-handle')) return;
-            const wrapper = row.firstElementChild;
-            if (!wrapper) return;
+        /* --- persistence --- */
 
-            const handle = document.createElement('div');
-            handle.className = 'tm-handle';
-            handle.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h.01M8 12h.01M8 18h.01M16 6h.01M16 12h.01M16 18h.01" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-            handle.onpointerdown = (e) => this.dragStart(e, row);
-            wrapper.prepend(handle);
-        }
+        applyOrder(list) {
+            if (this.drag || !list.isConnected) return;
 
-        /* --- DRAG LOGIC --- */
-        dragStart(e, row) {
-            e.preventDefault();
-            const list = row.parentElement;
-            if (e.target.setPointerCapture) e.target.setPointerCapture(e.pointerId);
+            // runaway guard: if React keeps fighting us, back off briefly
+            const t = this.throttle.get(list) || { n: 0, at: 0 };
+            const now = Date.now();
+            if (now - t.at > 3000) { t.n = 0; t.at = now; }
+            if (++t.n > 8) { this.throttle.set(list, { n: 0, at: now + 4000 }); return; }
+            this.throttle.set(list, t);
 
-            // Lock body scroll on mobile
-            document.body.classList.add('tm-drag-active');
+            const rows = rowsOf(list);
+            if (rows.length < 2) return;
 
-            const rect = row.getBoundingClientRect();
+            const saved = this.book.get(listKey(list));
+            if (!saved.length) return;
 
-            const placeholder = document.createElement('div');
-            placeholder.className = 'tm-placeholder';
-            placeholder.style.height = `${rect.height}px`;
-            row.before(placeholder);
-
-            const bg = window.getComputedStyle(row).backgroundColor;
-            row.style.setProperty('--drag-bg', bg === 'rgba(0, 0, 0, 0)' ? '#1f2937' : bg);
-            row.style.setProperty('--drag-width', `${rect.width}px`);
-            row.classList.add('tm-dragging');
-
-            // Find the scrollable ancestor once
-            const scrollParent = list.closest('.overflow-y-auto, [style*="overflow"]') || list;
-
-            this.drag = {
-                row, list, placeholder, scrollParent,
-                offsetY: e.clientY - rect.top,
-                startX: rect.left
-            };
-
-            this.updatePosition(e.clientY);
-
-            this._scrollSpeed = 0;
-            this._startScrollLoop();
-
-            this.drag.moveFn = (ev) => this.dragMove(ev);
-            this.drag.upFn = (ev) => this.dragEnd(ev);
-
-            document.addEventListener('pointermove', this.drag.moveFn, { passive: false });
-            document.addEventListener('pointerup', this.drag.upFn);
-            document.addEventListener('pointercancel', this.drag.upFn);
-        }
-
-        dragMove(e) {
-            if (!this.drag) return;
-            e.preventDefault();
-            this.updatePosition(e.clientY);
-            this.checkSort(e.clientY);
-            this._computeScrollSpeed(e.clientY);
-        }
-
-        updatePosition(y) {
-            const { row, offsetY, startX } = this.drag;
-            row.style.top = `${y - offsetY}px`;
-            row.style.left = `${startX}px`;
-        }
-
-        /* --- RAF AUTO-SCROLL (decoupled from pointermove) --- */
-
-        _computeScrollSpeed(y) {
-            const { scrollParent } = this.drag;
-            if (!scrollParent) { this._scrollSpeed = 0; return; }
-
-            const r = scrollParent.getBoundingClientRect();
-            const edgeZone = 70;
-            const maxSpeed = 6;
-
-            if (y < r.top + edgeZone) {
-                const ratio = 1 - Math.max(0, y - r.top) / edgeZone;
-                this._scrollSpeed = -maxSpeed * this._ease(ratio);
-            } else if (y > r.bottom - edgeZone) {
-                const ratio = 1 - Math.max(0, r.bottom - y) / edgeZone;
-                this._scrollSpeed = maxSpeed * this._ease(ratio);
-            } else {
-                this._scrollSpeed = 0;
-            }
-        }
-
-        _ease(t) {
-            return t * t;
-        }
-
-        _startScrollLoop() {
-            if (this._scrollRAF) return;
-
-            const tick = () => {
-                if (!this.drag) {
-                    this._scrollRAF = null;
-                    return;
-                }
-
-                if (this._scrollSpeed !== 0) {
-                    this.drag.scrollParent.scrollTop += this._scrollSpeed;
-                }
-
-                this._scrollRAF = requestAnimationFrame(tick);
-            };
-
-            this._scrollRAF = requestAnimationFrame(tick);
-        }
-
-        _stopScrollLoop() {
-            if (this._scrollRAF) {
-                cancelAnimationFrame(this._scrollRAF);
-                this._scrollRAF = null;
-            }
-            this._scrollSpeed = 0;
-        }
-
-        /* --- SORT CHECK --- */
-        checkSort(y) {
-            const { list, placeholder } = this.drag;
-            const siblings = [...list.querySelectorAll(`:scope > ${CONFIG.selectors.row}:not(.tm-dragging)`)];
-
-            const nextSibling = siblings.find(sibling => {
-                const box = sibling.getBoundingClientRect();
-                return y < box.top + (box.height / 2);
+            const idx = new Map(saved.map((n, i) => [n, i]));
+            const known = [], fresh = [];
+            rows.forEach(r => {
+                const n = rowName(r);
+                (n && idx.has(n) ? known : fresh).push(r);
             });
+            known.sort((a, b) => idx.get(rowName(a)) - idx.get(rowName(b)));
+            const want = known.concat(fresh);
 
-            if (nextSibling) nextSibling.before(placeholder);
-            else list.appendChild(placeholder);
-        }
+            let same = true;
+            for (let i = 0; i < rows.length; i++) if (rows[i] !== want[i]) { same = false; break; }
+            if (same) return;
 
-        /* --- DRAG END --- */
-        dragEnd(e) {
-            if (!this.drag) return;
-            const { row, placeholder, list, moveFn, upFn } = this.drag;
-
-            document.removeEventListener('pointermove', moveFn);
-            document.removeEventListener('pointerup', upFn);
-            document.removeEventListener('pointercancel', upFn);
-
-            // Unlock body scroll
-            document.body.classList.remove('tm-drag-active');
-
-            this._stopScrollLoop();
-
-            placeholder.replaceWith(row);
-            row.classList.remove('tm-dragging');
-            row.style.removeProperty('top');
-            row.style.removeProperty('left');
-            row.style.removeProperty('width');
-
-            this.saveOrder(list);
-            this.drag = null;
+            const tail = rows[rows.length - 1].nextSibling;  // keep trailing UI in place
+            this.applying.add(list);
+            want.forEach(el => list.insertBefore(el, tail));
+            queueMicrotask(() => this.applying.delete(list));
         }
 
         saveOrder(list) {
-            let globalOrder = this.orderStore.get().order || [];
-
-            const currentNames = [...list.querySelectorAll(CONFIG.selectors.row)]
-                .map(r => r.querySelector(CONFIG.selectors.name)?.textContent?.trim())
-                .filter(Boolean);
-
-            globalOrder = globalOrder.filter(n => !currentNames.includes(n));
-            globalOrder.push(...currentNames);
-
-            this.orderStore.save({ order: globalOrder });
+            const names = rowsOf(list).map(rowName).filter(Boolean);
+            if (!names.length) return;
+            const key = listKey(list);
+            this.book.set(key, mergeOrder(this.book.get(key), names));
         }
 
-        /* ── FIX: re-written to place unsorted items at the END, not the top ── */
-        applySavedOrder(list) {
-            const savedData = this.orderStore.get();
-            const globalOrder = savedData.order || [];
-            if (!globalOrder.length) return;
+        /* --- drag: press --- */
 
-            const items = [...list.querySelectorAll(`:scope > ${CONFIG.selectors.row}`)];
-            if (!items.length) return;
+        press(e, row) {
+            if (e.button > 0) return;
+            if (this.pending || this.drag) return;
 
-            const nameOf = (el) => el.querySelector(CONFIG.selectors.name)?.textContent?.trim();
-            const savedSet = new Set(globalOrder);
+            e.preventDefault();
+            e.stopPropagation();
 
-            // Split into: items with a saved position, and brand-new items
-            const sorted = [];
-            const unsorted = [];
+            const handle = e.currentTarget;
+            try { handle.setPointerCapture(e.pointerId); } catch (_) {}
 
-            items.forEach(el => {
-                const n = nameOf(el);
-                if (n && savedSet.has(n)) sorted.push(el);
-                else unsorted.push(el);
+            const move   = (ev) => this.move(ev);
+            const up     = (ev) => this.release(ev);
+            const eat    = (ev) => { if (this.drag) { ev.stopPropagation(); if (ev.cancelable) ev.preventDefault(); } };
+            const EATEN  = ['mousemove','mouseover','mouseout','mouseenter','mouseleave',
+                            'touchmove','touchstart','dragstart','selectstart','contextmenu'];
+
+            this.pending = {
+                row, handle, id: e.pointerId,
+                x: e.clientX, y: e.clientY,
+                move, up, eat, EATEN,
+                wasFocused: document.activeElement
+            };
+
+            // capture phase = we see it first and stop it before the menu does
+            document.addEventListener('pointermove',   move, { capture: true, passive: false });
+            document.addEventListener('pointerup',     up,   { capture: true });
+            document.addEventListener('pointercancel', up,   { capture: true });
+            EATEN.forEach(t => document.addEventListener(t, eat, { capture: true, passive: false }));
+        }
+
+        /* --- drag: start --- */
+
+        begin() {
+            const { row } = this.pending;
+            const list = row.parentElement;
+            const rect = row.getBoundingClientRect();
+
+            const ph = document.createElement('div');
+            ph.className = 'tm-ph';
+            ph.style.height = rect.height + 'px';
+            row.before(ph);
+
+            let bg = getComputedStyle(row).backgroundColor;
+            if (!bg || bg === 'transparent' || /,\s*0\)$/.test(bg)) {
+                bg = getComputedStyle(list).backgroundColor;
+            }
+            if (!bg || bg === 'transparent' || /,\s*0\)$/.test(bg)) {
+                bg = matchMedia('(prefers-color-scheme: dark)').matches ? '#1f2937' : '#ffffff';
+            }
+
+            row.style.setProperty('--tm-bg', bg);
+            row.style.setProperty('--tm-w', rect.width + 'px');
+            row.style.left = rect.left + 'px';
+            row.style.top  = rect.top + 'px';
+            row.classList.add('tm-dragging');
+
+            document.documentElement.classList.add('tm-drag-on');
+            if (navigator.vibrate) { try { navigator.vibrate(8); } catch (_) {} }
+
+            this.drag = {
+                row, list, ph,
+                scroller: findScroller(list),
+                grab: this.pending.y - rect.top,
+                base: rect.top,
+                y: this.pending.y,
+                raf: 0
+            };
+
+            this.loop();
+        }
+
+        /* --- drag: move --- */
+
+        move(e) {
+            const p = this.pending;
+            if (!p || e.pointerId !== p.id) return;
+
+            if (!this.drag) {
+                if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < CFG.threshold) return;
+                this.begin();
+            }
+
+            if (e.cancelable) e.preventDefault();
+            e.stopPropagation();
+            this.drag.y = e.clientY;
+        }
+
+        /* --- drag: per-frame work (position, sort, autoscroll) --- */
+
+        loop() {
+            const step = () => {
+                const d = this.drag;
+                if (!d) return;
+
+                if (!d.row.isConnected || !d.ph.isConnected || !d.list.isConnected) {
+                    this.finish(true);
+                    return;
+                }
+
+                d.row.style.transform = `translate3d(0, ${d.y - d.grab - d.base}px, 0)`;
+
+                const box  = scrollBox(d.scroller);
+                const zone = Math.max(36, Math.min(90, box.height * 0.18));
+                let speed = 0;
+                if (d.y < box.top + zone) {
+                    const r = 1 - Math.max(0, d.y - box.top) / zone;
+                    speed = -CFG.maxSpeed * r * r;
+                } else if (d.y > box.bottom - zone) {
+                    const r = 1 - Math.max(0, box.bottom - d.y) / zone;
+                    speed = CFG.maxSpeed * r * r;
+                }
+                if (speed) d.scroller.scrollTop += speed;
+
+                this.sortCheck(d.y);
+                d.raf = requestAnimationFrame(step);
+            };
+            this.drag.raf = requestAnimationFrame(step);
+        }
+
+        sortCheck(y) {
+            const { list, ph, row } = this.drag;
+            const sibs = Array.from(list.children).filter(
+                el => el !== row && el !== ph && el.matches && el.matches(CFG.sel.row)
+            );
+
+            let target = null;
+            for (const s of sibs) {
+                const b = s.getBoundingClientRect();
+                if (!b.height) continue;
+                if (y < b.top + b.height / 2) { target = s; break; }
+            }
+
+            if (target) {
+                if (ph.nextElementSibling !== target) target.before(ph);
+            } else {
+                const last = sibs[sibs.length - 1];
+                if (last && ph.previousElementSibling !== last) last.after(ph);
+            }
+        }
+
+        /* --- drag: release --- */
+
+        release(e) {
+            const p = this.pending;
+            if (!p || (e && e.pointerId !== p.id)) return;
+            if (this.drag && e && e.cancelable) e.preventDefault();
+            if (this.drag && e) e.stopPropagation();
+            this.finish(false);
+        }
+
+        finish(aborted) {
+            const p = this.pending;
+            if (p) {
+                document.removeEventListener('pointermove',   p.move, true);
+                document.removeEventListener('pointerup',     p.up,   true);
+                document.removeEventListener('pointercancel', p.up,   true);
+                p.EATEN.forEach(t => document.removeEventListener(t, p.eat, true));
+                try { p.handle.releasePointerCapture(p.id); } catch (_) {}
+            }
+
+            const d = this.drag;
+            this.drag = null;
+            this.pending = null;
+
+            if (!d) return;   // was only a tap on the handle
+
+            cancelAnimationFrame(d.raf);
+            document.documentElement.classList.remove('tm-drag-on');
+
+            const { row, ph, list } = d;
+            row.classList.remove('tm-dragging');
+            ['transform','top','left','width'].forEach(k => row.style.removeProperty(k));
+            row.style.removeProperty('--tm-bg');
+            row.style.removeProperty('--tm-w');
+
+            if (ph.isConnected) {
+                if (aborted) ph.remove();
+                else ph.replaceWith(row);
+            }
+
+            // A HeadlessUI popover closes when focus escapes it. Put it back.
+            requestAnimationFrame(() => {
+                const active = document.activeElement;
+                if (!active || active === document.body) {
+                    try { (row.focus ? row : p && p.wasFocused)?.focus({ preventScroll: true }); } catch (_) {}
+                }
             });
 
-            // Sort the "sorted" group by their saved index
-            sorted.sort((a, b) => {
-                return globalOrder.indexOf(nameOf(a)) - globalOrder.indexOf(nameOf(b));
-            });
-
-            // Append: saved-order items first, then unsorted (new plugins) at the end
-            sorted.forEach(el => list.appendChild(el));
-            unsorted.forEach(el => list.appendChild(el));
+            shieldClicks();
+            if (!aborted && list.isConnected) this.saveOrder(list);
         }
     }
 
+    /* ------------------------------------------------- folder open/closed */
+
+    class StateKeeper {
+        constructor() {
+            this.busy = false;
+            this.sweep();
+            new MutationObserver(() => this.sweep())
+                .observe(document.body, { childList: true, subtree: true });
+        }
+
+        sweep() {
+            if (window.__tmSorter && window.__tmSorter.drag) return;
+            document.querySelectorAll(CFG.sel.header).forEach(h => this.init(h));
+        }
+
+        init(header) {
+            if (header.dataset.tmState) return;
+            header.dataset.tmState = '1';
+
+            const title = normTitle(header.textContent);
+            if (!title) { delete header.dataset.tmState; return; }
+
+            const all   = Store.read(CFG.keyState, {}) || {};
+            const saved = all[title];
+            const open  = header.getAttribute('aria-expanded') === 'true';
+
+            if (saved !== undefined && saved !== open && !this.busy) {
+                this.busy = true;
+                header.click();
+                setTimeout(() => { this.busy = false; }, 120);
+            }
+
+            header.addEventListener('click', () => {
+                setTimeout(() => {
+                    if (this.busy) return;
+                    const next = Store.read(CFG.keyState, {}) || {};
+                    next[title] = header.getAttribute('aria-expanded') === 'true';
+                    Store.write(CFG.keyState, next);
+                }, 60);
+            });
+        }
+    }
+
+    /* ------------------------------------------------------------- boot */
+
+    const sorter = new Sorter();
+    window.__tmSorter = sorter;
     new StateKeeper();
-    new PluginSorter();
+
+    window.tmSorter = {
+        dump:  () => Store.read(CFG.keyOrder, null),
+        apply: () => sorter.scan(),
+        reset: () => { sorter.book.wipe(); location.reload(); }
+    };
+
+    console.log('[tm-sorter] v8 ready');
 })();
