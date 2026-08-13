@@ -168,7 +168,7 @@
       }
 
       #${TOGGLE_ID}.chat-visible {
-        opacity: 0.5;
+        opacity: 0.3;
         visibility: visible;
         pointer-events: auto;
         transform: translateY(0) scale(1);
