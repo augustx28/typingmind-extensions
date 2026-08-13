@@ -55,7 +55,7 @@
     /\b(thought|thoughts|thinking|reasoning|reasoned)\b/i;
 
   // Geometry
-  const BUTTON_SIZE = 30;
+  const BUTTON_SIZE = 32;
   const EDGE_MARGIN = 8;
   const PANEL_GAP = 8;
   const MIN_PANEL_HEIGHT = 140;
@@ -168,7 +168,7 @@
       }
 
       #${TOGGLE_ID}.chat-visible {
-        opacity: 0.50;
+        opacity: 0.75;
         visibility: visible;
         pointer-events: auto;
         transform: translateY(0) scale(1);
