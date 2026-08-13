@@ -183,7 +183,7 @@
       }
 
       #${TOGGLE_ID}:hover {
-        background: rgba(180, 180, 180, 0.35);
+        background: rgba(180, 180, 180, 0.20);
         color: rgba(60, 60, 60, 0.9);
       }
 
