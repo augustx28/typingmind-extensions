@@ -188,7 +188,7 @@
       }
 
       #${TOGGLE_ID}:active {
-        background: rgba(180, 180, 180, 0.35);
+        background: rgba(180, 180, 180, 0.25);
       }
 
       #${TOGGLE_ID}.active {
