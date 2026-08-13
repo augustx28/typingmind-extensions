@@ -66,7 +66,7 @@
   const CLICK_SUPPRESS_MS = 250;
   const REFRESH_DEBOUNCE_MS = 450;
   const REFRESH_MAX_WAIT_MS = 1600;
-  const VISIBILITY_DEBOUNCE_MS = 25;
+  const VISIBILITY_DEBOUNCE_MS = 10;
 
   let panelVisible = false;
   let destroyed = false;
