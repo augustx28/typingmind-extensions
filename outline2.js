@@ -168,7 +168,7 @@
       }
 
       #${TOGGLE_ID}.chat-visible {
-        opacity: 0.5;
+        opacity: 1;
         visibility: visible;
         pointer-events: auto;
         transform: translateY(0) scale(1);
@@ -192,7 +192,7 @@
       }
 
       #${TOGGLE_ID}.active {
-        background: rgba(200, 155, 60, 0.2);
+        background: rgba(200, 155, 60, 0.5);
         color: rgba(190, 140, 50, 0.95);
         border-color: rgba(200, 155, 60, 0.3);
       }
