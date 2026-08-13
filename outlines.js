@@ -55,7 +55,7 @@
     /\b(thought|thoughts|thinking|reasoning|reasoned)\b/i;
 
   // Geometry
-  const BUTTON_SIZE = 32;
+  const BUTTON_SIZE = 28;
   const EDGE_MARGIN = 8;
   const PANEL_GAP = 8;
   const MIN_PANEL_HEIGHT = 140;
@@ -168,7 +168,7 @@
       }
 
       #${TOGGLE_ID}.chat-visible {
-        opacity: 0.75;
+        opacity: 1;
         visibility: visible;
         pointer-events: auto;
         transform: translateY(0) scale(1);
@@ -183,16 +183,16 @@
       }
 
       #${TOGGLE_ID}:hover {
-        background: rgba(180, 180, 180, 0.25);
+        background: rgba(180, 180, 180, 0.35);
         color: rgba(60, 60, 60, 0.9);
       }
 
       #${TOGGLE_ID}:active {
-        background: rgba(180, 180, 180, 0.25);
+        background: rgba(180, 180, 180, 0.45);
       }
 
       #${TOGGLE_ID}.active {
-        background: rgba(200, 155, 60, 0.25);
+        background: rgba(200, 155, 60, 0.2);
         color: rgba(190, 140, 50, 0.95);
         border-color: rgba(200, 155, 60, 0.3);
       }
