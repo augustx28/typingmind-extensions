@@ -139,7 +139,7 @@
         width: ${BUTTON_SIZE}px;
         height: ${BUTTON_SIZE}px;
         padding: 0;
-        border-radius: 15px;
+        border-radius: 7px;
         border: 1px solid rgba(128, 128, 128, 0.15);
         background: rgba(180, 180, 180, 0.18);
         color: rgba(100, 100, 100, 0.7);
@@ -168,7 +168,7 @@
       }
 
       #${TOGGLE_ID}.chat-visible {
-        opacity: 1;
+        opacity: 0.1;
         visibility: visible;
         pointer-events: auto;
         transform: translateY(0) scale(1);
@@ -184,11 +184,11 @@
 
       #${TOGGLE_ID}:hover {
         background: rgba(180, 180, 180, 0.35);
-        color: rgba(60, 60, 60, 0.9);
+        color: rgba(60, 60, 60, 0.5);
       }
 
       #${TOGGLE_ID}:active {
-        background: rgba(180, 180, 180, 0.45);
+        background: rgba(180, 180, 180, 0.35);
       }
 
       #${TOGGLE_ID}.active {
