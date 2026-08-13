@@ -139,7 +139,7 @@
         width: ${BUTTON_SIZE}px;
         height: ${BUTTON_SIZE}px;
         padding: 0;
-        border-radius: 5px;
+        border-radius: 15px;
         border: 1px solid rgba(128, 128, 128, 0.15);
         background: rgba(180, 180, 180, 0.18);
         color: rgba(100, 100, 100, 0.7);
@@ -168,7 +168,7 @@
       }
 
       #${TOGGLE_ID}.chat-visible {
-        opacity: 0.1;
+        opacity: 1;
         visibility: visible;
         pointer-events: auto;
         transform: translateY(0) scale(1);
