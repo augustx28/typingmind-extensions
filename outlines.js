@@ -55,7 +55,7 @@
     /\b(thought|thoughts|thinking|reasoning|reasoned)\b/i;
 
   // Geometry
-  const BUTTON_SIZE = 28;
+  const BUTTON_SIZE = 30;
   const EDGE_MARGIN = 8;
   const PANEL_GAP = 8;
   const MIN_PANEL_HEIGHT = 140;
@@ -188,7 +188,7 @@
       }
 
       #${TOGGLE_ID}:active {
-        background: rgba(180, 180, 180, 0.45);
+        background: rgba(180, 180, 180, 0.35);
       }
 
       #${TOGGLE_ID}.active {
