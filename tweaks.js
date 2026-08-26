@@ -30,6 +30,7 @@
     globalUiFont: "tweak_globalUiFont",
     globalFontFile: "tweak_globalFontFileData",
     chatFontFile: "tweak_chatFontFileData",
+    sidebarFontSize: "tweak_sidebarFontSize",
     userBubbleBgColor: "tweak_userBubbleBgColor",
     userBubbleTextColor: "tweak_userBubbleTextColor",
   };
@@ -38,6 +39,15 @@
     settingsKeys.userBubbleBgColor,
     settingsKeys.userBubbleTextColor,
   ];
+
+  // Sidebar containers whose text follows the menu bar chat list size setting.
+  const SIDEBAR_TEXT_SELECTORS = [
+    '[data-element-id="side-bar-middle-part"]',
+    '[data-element-id="custom-chat-item"]',
+    '[data-element-id="selected-chat-item"]',
+    '[data-element-id="chat-folder"]',
+  ];
+  const SIDEBAR_TEXT_TAGS = ["div", "span", "p", "a", "button"];
 
   // Visual fallbacks used by the pickers and the live preview when nothing is set.
   const CHAT_COLOR_DEFAULTS = {
@@ -65,6 +75,7 @@
   let faviconObserver = null;
   let faviconObserverActive = false;
   let activeGlobalUIFontLink = null;
+  let activeUploadedFontFace = null;
 
   const cleanValue = (value) => {
     if (value === null || typeof value === 'undefined') return null;
@@ -262,6 +273,9 @@
   }
 
   // Injects (or removes) the @font-face rule for an uploaded font file.
+  // The CSS format() hint is deliberately left out here: when a hint does not
+  // match the real bytes of the file, the browser skips the source silently and
+  // the uploaded font appears to do nothing. Used as the fallback path only.
   // Returns true when the font face is ready to use.
   function syncUploadedFontFace(fileData, styleId, fontFamily) {
     let styleEl = document.getElementById(styleId);
@@ -269,14 +283,82 @@
       if (styleEl) styleEl.remove();
       return false;
     }
-    const formatPart = fileData.format ? ` format('${fileData.format}')` : "";
-    const css = `@font-face { font-family: '${fontFamily}'; src: url('${fileData.dataUrl}')${formatPart}; font-display: swap; }`;
+    const css = `@font-face { font-family: '${fontFamily}'; src: url('${fileData.dataUrl}'); font-display: swap; }`;
     if (!styleEl) {
       styleEl = document.createElement("style");
       styleEl.id = styleId;
       document.head.appendChild(styleEl);
     }
     if (styleEl.textContent !== css) styleEl.textContent = css;
+    return true;
+  }
+
+  // Turns a stored base64 data URL back into raw bytes for the FontFace API.
+  function dataUrlToArrayBuffer(dataUrl) {
+    const raw = String(dataUrl || "");
+    const commaIndex = raw.indexOf(",");
+    if (commaIndex === -1) return null;
+    if (!raw.slice(0, commaIndex).includes(";base64")) return null;
+    try {
+      const binary = atob(raw.slice(commaIndex + 1));
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    } catch (e) {
+      console.error(`${consolePrefix} Could not decode the stored global font file.`, e);
+      return null;
+    }
+  }
+
+  function unregisterUploadedFontFace() {
+    if (activeUploadedFontFace && document.fonts) {
+      try { document.fonts.delete(activeUploadedFontFace); } catch (e) { /* ignore */ }
+    }
+    activeUploadedFontFace = null;
+  }
+
+  // Registers the uploaded global font straight from its bytes. The browser
+  // reads the real file signature instead of trusting a CSS format() hint, and
+  // nothing is fetched through a data: URL, so this works where the plain
+  // @font-face rule quietly failed.
+  function registerUploadedGlobalFont(fileData) {
+    if (typeof FontFace === "undefined" || !document.fonts || !document.fonts.add) return false;
+    const signature = `${fileData.fileName || ""}|${String(fileData.dataUrl).length}`;
+    if (activeUploadedFontFace && activeUploadedFontFace.tmTweaksSignature === signature) return true;
+    unregisterUploadedFontFace();
+    const buffer = dataUrlToArrayBuffer(fileData.dataUrl);
+    if (!buffer) return false;
+    let face;
+    try {
+      face = new FontFace(UPLOADED_FONT_FAMILY, buffer, { display: "swap" });
+    } catch (e) {
+      console.error(`${consolePrefix} Could not create a font face for the uploaded global font.`, e);
+      return false;
+    }
+    face.tmTweaksSignature = signature;
+    activeUploadedFontFace = face;
+    face.load().then((loadedFace) => {
+      document.fonts.add(loadedFace);
+    }).catch((error) => {
+      console.error(`${consolePrefix} The uploaded global font could not be parsed:`, error);
+      if (activeUploadedFontFace === face) activeUploadedFontFace = null;
+      // Last resort: hand the file to the CSS engine instead.
+      syncUploadedFontFace(fileData, "tweak-uploaded-font-face", UPLOADED_FONT_FAMILY);
+      showFeedback("That font file could not be read. Try the .woff2 or .ttf version of it.", 4000);
+    });
+    return true;
+  }
+
+  // Single entry point for the uploaded global font: register the bytes when we
+  // can, and keep the CSS rule around only when the FontFace API is unavailable.
+  function syncUploadedGlobalFont(fileData) {
+    if (!fileData || !fileData.dataUrl) {
+      unregisterUploadedFontFace();
+      syncUploadedFontFace(null, "tweak-uploaded-font-face", UPLOADED_FONT_FAMILY);
+      return false;
+    }
+    const registered = registerUploadedGlobalFont(fileData);
+    syncUploadedFontFace(registered ? null : fileData, "tweak-uploaded-font-face", UPLOADED_FONT_FAMILY);
     return true;
   }
 
@@ -302,6 +384,25 @@
     return true;
   }
 
+  // Backs the inline body style with a real stylesheet rule, so parts of the app
+  // that carry their own sans-serif class still pick up the chosen font. No
+  // !important on purpose: the chat font settings must stay on top.
+  function setGlobalUiFontStack(stack) {
+    const styleId = "tweak-global-ui-font-style";
+    let styleEl = document.getElementById(styleId);
+    if (!stack) {
+      if (styleEl) styleEl.remove();
+      return;
+    }
+    const css = `html, body, .font-sans { font-family: ${stack}; }`;
+    if (!styleEl) {
+      styleEl = document.createElement("style");
+      styleEl.id = styleId;
+      document.head.appendChild(styleEl);
+    }
+    if (styleEl.textContent !== css) styleEl.textContent = css;
+  }
+
   function applyGlobalUiFont() {
     const fontSetting = getSetting(settingsKeys.globalUiFont, null);
     const targetElement = document.body;
@@ -309,11 +410,12 @@
 
     const isFileFont = !!(fontSetting && fontSetting.isFile);
     const fileData = isFileFont ? getSetting(settingsKeys.globalFontFile, null) : null;
-    const fileFaceReady = syncUploadedFontFace(isFileFont ? fileData : null, "tweak-uploaded-font-face", UPLOADED_FONT_FAMILY);
+    const fileFaceReady = syncUploadedGlobalFont(isFileFont ? fileData : null);
 
     if (!fontSetting || (!fontSetting.name && !fontSetting.isUrl)) {
       targetElement.style.fontFamily = '';
       targetElement.style.fontWeight = '';
+      setGlobalUiFontStack(null);
       removeActiveGlobalUIFontLink();
       return;
     }
@@ -323,6 +425,7 @@
         // The stored font file is missing; fall back to the default UI font.
         targetElement.style.fontFamily = '';
         targetElement.style.fontWeight = '';
+        setGlobalUiFontStack(null);
         return;
       }
     } else if (fontSetting.isGoogle && fontSetting.name) {
@@ -334,8 +437,45 @@
     }
     const safeName = fontSetting.name && String(fontSetting.name).trim() !== "" ? `"${fontSetting.name}"` : null;
     const fallbackStack = 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"';
-    targetElement.style.fontFamily = safeName ? `${safeName}, ${fallbackStack}` : fallbackStack;
+    const stack = safeName ? `${safeName}, ${fallbackStack}` : fallbackStack;
+    targetElement.style.fontFamily = stack;
     targetElement.style.fontWeight = fontSetting.weight || DEFAULT_FONT_WEIGHT;
+    setGlobalUiFontStack(safeName ? stack : null);
+  }
+
+  // ---------------------------------------------------------------
+  // Menu bar font size
+  // ---------------------------------------------------------------
+  function applySidebarFontSize() {
+    const styleId = "tweak-sidebar-font-size-style";
+    let styleElement = document.getElementById(styleId);
+    if (!styleElement) {
+      styleElement = document.createElement("style");
+      styleElement.id = styleId;
+      document.head.appendChild(styleElement);
+    }
+    const rawValue = getSetting(settingsKeys.sidebarFontSize, null);
+    const parsed = parseInt(rawValue, 10);
+    const sidebarSize = (rawValue === null || typeof rawValue === "undefined" || String(rawValue).trim() === "" || isNaN(parsed))
+      ? null
+      : Math.min(40, Math.max(8, parsed));
+    let newContent = "";
+
+    if (sidebarSize) {
+      const selectors = [];
+      SIDEBAR_TEXT_SELECTORS.forEach((base) => {
+        selectors.push(base);
+        SIDEBAR_TEXT_TAGS.forEach((tag) => selectors.push(`${base} ${tag}`));
+      });
+      newContent = `
+      ${selectors.join(",\n      ")} {
+        font-size: ${sidebarSize}px !important;
+        line-height: 1.35 !important;
+      }`;
+    }
+    if (styleElement.textContent !== newContent) {
+      styleElement.textContent = newContent;
+    }
   }
 
   // ---------------------------------------------------------------
@@ -1007,6 +1147,23 @@
         </div>
     `;
 
+    // --- Menu bar font size section ---
+    const uiSizeSection = document.createElement("div");
+    uiSizeSection.className = "tweak-settings-section";
+    const uiSizeHeader = document.createElement("h3");
+    uiSizeHeader.textContent = "Menu bar font size";
+    uiSizeSection.appendChild(uiSizeHeader);
+    const uiSizeNote = document.createElement("p");
+    uiSizeNote.className = "tweak-section-note";
+    uiSizeNote.textContent = "Sizes the chat titles and folders in the left sidebar. Leave it empty to keep the TypingMind default. Allowed range: 8 to 40.";
+    uiSizeSection.appendChild(uiSizeNote);
+
+    const sidebarFontSizeInput = createTextInput("tweak_sidebarFontSize_input", "Chat list size (px):", settingsKeys.sidebarFontSize, "e.g., 16", "number", {
+      min: "8", max: "40", step: "1", inputmode: "numeric"
+    });
+    sidebarFontSizeInput.style.marginTop = "5px";
+    uiSizeSection.appendChild(sidebarFontSizeInput);
+
     // --- Chat font section ---
     const fontSettingsContainer = document.createElement("div");
     fontSettingsContainer.className = "tweak-settings-section";
@@ -1130,7 +1287,7 @@
       showFeedback("Favicon cleared. Default restored.", 2500);
     });
 
-    scrollableContent.append(settingsSection, chatColorsSection, globalFontSettingsSection, fontSettingsContainer, faviconSettingsSection);
+    scrollableContent.append(settingsSection, chatColorsSection, globalFontSettingsSection, uiSizeSection, fontSettingsContainer, faviconSettingsSection);
 
     const footer = document.createElement("div");
     footer.className = "tweak-modal-footer";
@@ -1373,6 +1530,8 @@
     document.getElementById("tweak_customFontFamily_input").value = getSetting(settingsKeys.customFontFamily, "") || "";
     const fontSize = getSetting(settingsKeys.customFontSize, null);
     document.getElementById("tweak_customFontSize_input").value = fontSize !== null ? fontSize : "";
+    const sidebarSizeValue = getSetting(settingsKeys.sidebarFontSize, null);
+    document.getElementById("tweak_sidebarFontSize_input").value = sidebarSizeValue !== null ? sidebarSizeValue : "";
 
     loadChatColorInputs();
     updateChatColorPreview();
@@ -1431,7 +1590,7 @@
       let valueToStore = value;
       if ([settingsKeys.customFontUrl, settingsKeys.customFontFamily, settingsKeys.localFontFamily, settingsKeys.customPageTitle, settingsKeys.customFaviconData].includes(key)) {
         valueToStore = (value && String(value).trim() !== "") ? String(value).trim() : null;
-      } else if (key === settingsKeys.customFontSize) {
+      } else if ([settingsKeys.customFontSize, settingsKeys.sidebarFontSize].includes(key)) {
         valueToStore = (value !== null && !isNaN(parseInt(value, 10)) && String(value).trim() !== "") ? parseInt(value, 10) : null;
       }
 
@@ -1471,6 +1630,7 @@
         applyCustomFont();
         renderChatFontFileList();
       }
+      if (key === settingsKeys.sidebarFontSize) applySidebarFontSize();
       if (key === settingsKeys.customFaviconData) applyCustomFavicon();
       if (key === settingsKeys.globalUiFont || key === settingsKeys.globalFontFile) applyGlobalUiFont();
       if (CHAT_COLOR_KEYS.includes(key)) {
@@ -1791,16 +1951,18 @@
     applyStylesBasedOnSettings();
     applyCustomTitle();
     applyCustomFont();
+    applySidebarFontSize();
     applyChatColors();
     syncTweaksButton();
   }
 
   function initializeTweaks() {
     if (originalPageTitle === null) originalPageTitle = document.title;
-    // Clean up values from the removed input-box color feature.
+    // Clean up values from removed features (input-box colors, app-wide font size).
     try {
       localStorage.removeItem("tweak_inputBgColor");
       localStorage.removeItem("tweak_inputTextColor");
+      localStorage.removeItem("tweak_globalUiFontSize");
     } catch (e) { /* ignore */ }
     createSettingsModal();
     syncAll();
