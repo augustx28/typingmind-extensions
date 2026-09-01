@@ -3,15 +3,6 @@
   const COLOR = '#000000';
   const BORDER_COLOR = 'rgba(54, 55, 57, 0.6)';
   const css = `
-    /* 0a) Root + body. This is what shows behind the Android nav bar. */
-    html.dark, body.dark, .dark,
-    html.dark body, body.dark body {
-      background-color: ${COLOR} !important;
-    }
-    /* 0b) Kill the app's gray variable so untargeted panels inherit black */
-    html.dark, body.dark, .dark, :root {
-      --main-dark-color: ${COLOR} !important;
-    }
     /* 1) .md:flex .overflow-y-auto .resize-container */
     html.dark .md\\:flex .overflow-y-auto .resize-container,
     body.dark .md\\:flex .overflow-y-auto .resize-container,
@@ -73,12 +64,6 @@
     .dark [id^="response-"] .sm\\:px-6 {
       border-color: ${BORDER_COLOR} !important;
     }
-    /* 11) Safe-area filler strips at the very bottom of the viewport */
-    html.dark [style*="safe-area-inset-bottom"],
-    body.dark [style*="safe-area-inset-bottom"],
-    .dark [style*="safe-area-inset-bottom"] {
-      background-color: ${COLOR} !important;
-    }
   `;
   function upsertStyle() {
     let style = document.getElementById(EXT_ID);
@@ -89,34 +74,12 @@
     }
     if (style.textContent !== css) style.textContent = css;
   }
-  function upsertThemeColor() {
-    const metas = document.querySelectorAll('meta[name="theme-color"]');
-    if (metas.length === 0) {
-      const meta = document.createElement('meta');
-      meta.setAttribute('name', 'theme-color');
-      meta.setAttribute('content', COLOR);
-      document.head.appendChild(meta);
-      return;
-    }
-    for (const meta of metas) {
-      if (meta.getAttribute('content') !== COLOR) {
-        meta.setAttribute('content', COLOR);
-      }
-    }
-  }
-  function apply() {
-    upsertStyle();
-    upsertThemeColor();
-  }
   function init() {
-    apply();
-    const observer = new MutationObserver(apply);
+    upsertStyle();
     const watchTargets = [document.documentElement, document.body].filter(Boolean);
+    const observer = new MutationObserver(upsertStyle);
     for (const t of watchTargets) {
       observer.observe(t, { attributes: true, attributeFilter: ['class', 'data-theme'] });
-    }
-    if (document.head) {
-      observer.observe(document.head, { childList: true, subtree: true, attributes: true, attributeFilter: ['content'] });
     }
   }
   if (document.readyState === 'loading') {
