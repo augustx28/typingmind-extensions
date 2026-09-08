@@ -1,32 +1,25 @@
-(function () {
-  const STYLE_ID = 'tm-search-box-color';
-  const BOX_COLOR = '#131212'; // change this one value
+(() => {
+  const styleId = 'typingmind-search-bar-color';
 
-  const css = `
-input[data-element-id="search-chats-bar"] {
-  background-color: ${BOX_COLOR} !important;
-  background-image: none !important;
-}
-`;
+  function apply() {
+    let style = document.getElementById(styleId);
 
-  function inject() {
-    const old = document.getElementById(STYLE_ID);
-    if (old) old.remove();
+    if (!style) {
+      style = document.createElement('style');
+      style.id = styleId;
+      document.head.appendChild(style);
+    }
 
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = css;
-    (document.head || document.documentElement).appendChild(style);
+    style.textContent = `
+      input[data-element-id="search-chats-bar"] {
+        background-color: #131212 !important;
+      }
+    `;
   }
 
-  if (document.head) {
-    inject();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply, { once: true });
   } else {
-    document.addEventListener('DOMContentLoaded', inject, { once: true });
+    apply();
   }
-
-  const target = document.head || document.documentElement;
-  new MutationObserver(() => {
-    if (!document.getElementById(STYLE_ID)) inject();
-  }).observe(target, { childList: true });
 })();
