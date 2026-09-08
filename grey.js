@@ -1,45 +1,26 @@
-(() => {
-  "use strict";
+(function () {
+  const BOX_COLOR  = '#131212'; // search box background
+  const TEXT_COLOR = '#e5e5e5'; // text and placeholder inside it
 
-  const styleId = "typingmind-dark-gray-theme";
+  function paint() {
+    const input = document.querySelector('input[placeholder*="Search chats" i]');
+    if (!input) return;
 
-  const css = `
-    /* Search bar */
-    .dark [data-element-id="search-chats-bar"] {
-      background-color: #131313 !important;
+    input.style.setProperty('background-color', BOX_COLOR, 'important');
+    input.style.setProperty('color', TEXT_COLOR, 'important');
+    input.style.setProperty('border-color', BOX_COLOR, 'important');
+
+    const wrap = input.parentElement;
+    if (wrap) {
+      wrap.style.setProperty('background-color', BOX_COLOR, 'important');
+      wrap.style.setProperty('border-color', BOX_COLOR, 'important');
     }
-
-    /* Chat input box */
-    .dark [data-element-id="chat-space-end-part"] > .bg-slate-100 {
-      background-color: #181717 !important;
-    }
-
-    /* Fix the navy fade beside Send */
-    .dark [data-element-id="chat-input-actions"]
-      .scroll-indicator-gradient::after {
-      background: linear-gradient(
-        to right,
-        rgba(24, 23, 23, 0),
-        #181717
-      ) !important;
-    }
-  `;
-
-  function install() {
-    let style = document.getElementById(styleId);
-
-    if (!style) {
-      style = document.createElement("style");
-      style.id = styleId;
-      (document.head || document.documentElement).appendChild(style);
-    }
-
-    style.textContent = css;
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", install, { once: true });
-  } else {
-    install();
-  }
+  paint();
+
+  new MutationObserver(paint).observe(document.body, {
+    childList: true,
+    subtree: true
+  });
 })();
