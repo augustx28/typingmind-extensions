@@ -372,3 +372,13 @@
     init();
   }
 })();
+(() => {
+  "use strict";
+
+  const styleId = "typingmind-dark-gray-theme";
+
+  const css = `
+    /* Search bar */
+    .dark [data-element-id="search-chats-bar"] {
+      background-color: #131313 !important;
+    }
