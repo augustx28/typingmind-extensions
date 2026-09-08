@@ -275,7 +275,12 @@
 
   /* Single stylesheet. Theme first, menu second: later rules win ties.
      Swap these two if you want the theme to override the menu instead. */
-  const css = themeCss + menuCss;
+  const css = themeCss + menuCss + `
+  /* Search bar: dark mode only */
+  .dark [data-element-id="search-chats-bar"] {
+    background-color: #131313 !important;
+  }
+`;
 
   /* Tracks the current live <style> element so we can guard its contents. */
   let styleEl = null;
