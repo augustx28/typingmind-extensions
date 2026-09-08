@@ -1,8 +1,8 @@
 /* ============================================================
-   TypingMind Dark-Gray Patch  v1
-   Console helpers: tmTheme.audit() | tmTheme.findNavy()
-                    tmTheme.findGradients() | tmTheme.off() / .on()
-                    tmTheme.set('sidebar', '#181717')
+   TypingMind Dark-Gray Patch  v2
+   Console: tmTheme.inspectFade() | tmTheme.dumpRule('scroll-indicator')
+            tmTheme.audit() | tmTheme.findNavy() | tmTheme.findGradients()
+            tmTheme.off() / .on() | tmTheme.set('fade', '#181717')
    ============================================================ */
 (function () {
   'use strict';
@@ -13,13 +13,17 @@
   const C = {
     input:       '#100f0f',  // chat input textarea
     inputBox:    '#131212',  // container wrapping the input
-    sidebar:     '#131212',  // sidebar background (was navy)
+    sidebar:     '#131212',  // sidebar background
     search:      '#100f0f',  // search-chats field
     chatArea:    '#131212',  // main chat scroll area
     fade:        '#131212',  // flat color replacing the scroll gradient
     text:        '#e5e5e5',
     placeholder: '#7a7a7a'
   };
+
+  // 'flat' = solid color where the gradient was
+  // 'off'  = remove the fade entirely, nothing painted
+  let FADE_MODE = 'flat';
   /* ----------------------------------------- */
 
   const css = () => `
@@ -40,7 +44,7 @@
   background-image: none !important;
 }
 
-/* 3. Sidebar: navy to gray */
+/* 3. Sidebar (confirmed working, left alone) */
 [data-element-id="side-bar-background"],
 [data-element-id="sidebar-beginning-part"],
 [data-element-id="sidebar-middle-part"],
@@ -50,7 +54,6 @@
   background-image: none !important;
 }
 
-/* 3b. Search field inside the sidebar */
 [data-element-id="search-chats-bar"],
 [data-element-id="side-bar-background"] input[type="text"],
 [data-element-id="side-bar-background"] input[type="search"] {
@@ -73,7 +76,29 @@
   background-image: none !important;
 }
 
-/* 5. Scroll indicator: one flat color, no gradient */
+/* 5. THE FIX. Real class is .scroll-indicator-gradient.
+   Class repeated to double specificity so it beats their !important
+   regardless of stylesheet order. Covers background-image,
+   pseudo-element overlays, and mask-image. */
+.scroll-indicator-gradient.scroll-indicator-gradient,
+[class*="scroll-indicator"] {
+  background-image: none !important;
+  background-color: ${FADE_MODE === 'flat' ? C.fade : 'transparent'} !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+
+.scroll-indicator-gradient.scroll-indicator-gradient::before,
+.scroll-indicator-gradient.scroll-indicator-gradient::after {
+  background-image: none !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+  ${FADE_MODE === 'flat'
+    ? `background-color: ${C.fade} !important;`
+    : `content: none !important; display: none !important;`}
+}
+
+/* 5b. Any leftover Tailwind gradients in the chat column */
 [data-element-id="chat-space-beginning-part"] [class*="bg-gradient-to"],
 [data-element-id="chat-space-middle-part"] [class*="bg-gradient-to"],
 [data-element-id="chat-space-end-part"] [class*="bg-gradient-to"] {
@@ -99,7 +124,6 @@
     document.addEventListener('DOMContentLoaded', inject, { once: true });
   }
 
-  /* Head-only observer. Cheap, and it re-adds the tag if TypingMind wipes it. */
   const headObserver = new MutationObserver(() => {
     if (!document.getElementById(STYLE_ID)) inject();
   });
@@ -131,15 +155,64 @@
     },
 
     set(key, value) {
+      if (key === 'fadeMode') {
+        if (value !== 'flat' && value !== 'off') {
+          console.warn("[tmTheme] fadeMode must be 'flat' or 'off'");
+          return;
+        }
+        FADE_MODE = value;
+        inject();
+        return;
+      }
       if (!(key in C)) {
-        console.warn('[tmTheme] unknown key:', key, '| valid:', Object.keys(C).join(', '));
+        console.warn('[tmTheme] unknown key:', key, '| valid:', Object.keys(C).join(', '), ', fadeMode');
         return;
       }
       C[key] = value;
       inject();
     },
 
-    /* Which selectors actually match anything on your build */
+    /* Shows exactly HOW the fade is built: element, ::before, ::after */
+    inspectFade(selector = '.scroll-indicator-gradient') {
+      const el = document.querySelector(selector);
+      if (!el) { console.warn('[tmTheme] not on page:', selector); return null; }
+      const read = (pseudo) => {
+        const s = getComputedStyle(el, pseudo);
+        return {
+          target: pseudo || 'element',
+          content: pseudo ? s.content : '-',
+          backgroundImage: (s.backgroundImage || 'none').slice(0, 110),
+          backgroundColor: s.backgroundColor,
+          maskImage: (s.maskImage || s.webkitMaskImage || 'none').slice(0, 110),
+          position: s.position,
+          display: s.display
+        };
+      };
+      const rows = [read(null), read('::before'), read('::after')];
+      console.table(rows);
+      return rows;
+    },
+
+    /* Prints TypingMind's own CSS rule so we stop guessing */
+    dumpRule(needle = 'scroll-indicator') {
+      const found = [];
+      const walk = (rules, href) => {
+        for (const rule of rules) {
+          if (rule.selectorText && rule.selectorText.includes(needle)) {
+            found.push({ sheet: href || 'inline <style>', css: rule.cssText });
+          }
+          if (rule.cssRules) walk(rule.cssRules, href);
+        }
+      };
+      for (const sheet of document.styleSheets) {
+        try { walk(sheet.cssRules, sheet.href); }
+        catch (e) { /* cross-origin sheet, unreadable, skip */ }
+      }
+      if (!found.length) console.warn('[tmTheme] no rule matched:', needle);
+      found.forEach(f => console.log(`[${f.sheet}]\n${f.css}\n`));
+      return found;
+    },
+
     audit() {
       const sels = css()
         .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -161,7 +234,6 @@
       return rows;
     },
 
-    /* Find every element still painted navy-ish */
     findNavy() {
       const hits = [];
       document.querySelectorAll('*').forEach(el => {
@@ -179,13 +251,18 @@
       return hits;
     },
 
-    /* Find every element still running a gradient */
     findGradients() {
       const hits = [];
       document.querySelectorAll('*').forEach(el => {
-        const bi = getComputedStyle(el).backgroundImage;
-        if (bi && bi.includes('gradient')) {
-          hits.push({ ...describe(el), image: bi.slice(0, 100) });
+        const s = getComputedStyle(el);
+        const bi = s.backgroundImage || '';
+        const mi = s.maskImage || s.webkitMaskImage || '';
+        if (bi.includes('gradient') || mi.includes('gradient')) {
+          hits.push({
+            ...describe(el),
+            source: bi.includes('gradient') ? 'background-image' : 'mask-image',
+            value: (bi.includes('gradient') ? bi : mi).slice(0, 100)
+          });
         }
       });
       console.table(hits);
@@ -193,5 +270,5 @@
     }
   };
 
-  console.log('[tmTheme] loaded. Try tmTheme.audit()');
+  console.log('[tmTheme] v2 loaded. Run tmTheme.inspectFade()');
 })();
