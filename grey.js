@@ -1,333 +1,197 @@
-/* ============================================================================
- * TypingMind - Dark Input Fix  (v1.0)
- * ---------------------------------------------------------------------------
- * Replaces:
- *     .jsx-7078ffb922cb3c38 .leading-normal { background-color: #131313 }
- *     .pb-safe .bg-slate-100              { background-color: #181717 }
- *
- * Why JS instead of raw CSS:
- *   1. The .jsx-XXXXXXXX class is a styled-jsx build hash. It changes on every
- *      TypingMind release, so the CSS silently dies after an update.
- *   2. Static CSS only paints what you already know about. The leftover navy
- *      strip next to the Send button is a different element carrying Tailwind
- *      slate (#0f172a / #1e293b). This script finds ANY dark blue-tinted
- *      background inside the input area and repaints it, whatever it is called.
- *
- * Safety:
- *   - Only repaints elements whose CURRENT computed background is dark AND
- *     blue-tinted. Neutral greys and the bright blue Send button are ignored.
- *   - MutationObserver watches childList only, never attributes. No feedback
- *     loop, no mobile touch freeze.
- *
- * Console API:
- *   tmDark.off()                      disable + revert
- *   tmDark.on()                       re-enable
- *   tmDark.sweep()                    force a repaint pass
- *   tmDark.probe()                    toggle hover-inspect (logs any element)
- *   tmDark.set('boxBg', '#101010')    change a colour live
- *   tmDark.config                     read current settings
- * ========================================================================== */
-
+/* ============================================================
+   TypingMind Dark-Gray Patch  v1
+   Console helpers: tmTheme.audit() | tmTheme.findNavy()
+                    tmTheme.findGradients() | tmTheme.off() / .on()
+                    tmTheme.set('sidebar', '#181717')
+   ============================================================ */
 (function () {
   'use strict';
 
-  /* ------------------------------- CONFIG ------------------------------- */
+  const STYLE_ID = 'tm-dark-gray-patch';
 
-  const CFG = {
-    inputBg: '#131313',      // the typing area itself (textarea)
-    boxBg: '#181717',        // input shell + the strip next to Send
-    borderColor: '#242424',  // borders that were slate-tinted
-    recolorBorders: true,
-
-    // Navy detection. A colour counts as "navy" when every channel is dark
-    // AND blue sits meaningfully above red/green.
-    maxChannel: 110,         // slate-700 (85) passes, slate-500 (139) does not
-    blueBias: 12,            // slate-900 rgb(15,23,42) -> b-r = 27, passes
-
-    debounceMs: 150,
-    debug: false             // set true to log every element it repaints
+  /* ---------- edit only this block ---------- */
+  const C = {
+    input:       '#100f0f',  // chat input textarea
+    inputBox:    '#131212',  // container wrapping the input
+    sidebar:     '#131212',  // sidebar background (was navy)
+    search:      '#100f0f',  // search-chats field
+    chatArea:    '#131212',  // main chat scroll area
+    fade:        '#131212',  // flat color replacing the scroll gradient
+    text:        '#e5e5e5',
+    placeholder: '#7a7a7a'
   };
+  /* ----------------------------------------- */
 
-  /* ----------------------------- INTERNALS ------------------------------ */
+  const css = () => `
+/* 1. Chat input textarea */
+#chat-input-textbox,
+[data-element-id="chat-input-textbox"],
+[data-element-id="chat-space-end-part"] textarea {
+  background-color: ${C.input} !important;
+  background-image: none !important;
+  color: ${C.text} !important;
+}
 
-  const STYLE_ID = 'tm-dark-input-fix-style';
-  const PAINTED = 'data-tm-dark';
+/* 2. Box wrapping the input */
+[data-element-id="chat-space-end-part"] .bg-slate-100,
+[data-element-id="chat-space-end-part"] .bg-white,
+.pb-safe .bg-slate-100 {
+  background-color: ${C.inputBox} !important;
+  background-image: none !important;
+}
 
-  // Never touch these: interactive controls and graphics.
-  const SKIP_TAGS = new Set(['BUTTON', 'A', 'SVG', 'PATH', 'IMG', 'CANVAS', 'VIDEO', 'IFRAME']);
-  // These get inputBg instead of boxBg.
-  const TYPE_TAGS = new Set(['TEXTAREA']);
+/* 3. Sidebar: navy to gray */
+[data-element-id="side-bar-background"],
+[data-element-id="sidebar-beginning-part"],
+[data-element-id="sidebar-middle-part"],
+[data-element-id="sidebar-end-part"],
+[data-element-id="workspace-bar"] {
+  background-color: ${C.sidebar} !important;
+  background-image: none !important;
+}
 
-  // Where to look. First match wins; falls back to climbing from any textarea.
-  const SCOPE_SELECTOR = [
-    '[data-element-id="chat-space-end-part"]',
-    '[data-element-id="chat-input-textbox"]',
-    '[data-element-id="chat-input-actions"]',
-    '.pb-safe'
-  ].join(', ');
+/* 3b. Search field inside the sidebar */
+[data-element-id="search-chats-bar"],
+[data-element-id="side-bar-background"] input[type="text"],
+[data-element-id="side-bar-background"] input[type="search"] {
+  background-color: ${C.search} !important;
+  background-image: none !important;
+  color: ${C.text} !important;
+  border-color: rgba(255,255,255,.08) !important;
+}
+[data-element-id="search-chats-bar"]::placeholder,
+[data-element-id="side-bar-background"] input::placeholder {
+  color: ${C.placeholder} !important;
+}
 
-  let timer = null;
-  let observer = null;
-  let alive = false;
-  let probing = false;
+/* 4. Chat area */
+[data-element-id="chat-space-background"],
+[data-element-id="chat-space-beginning-part"],
+[data-element-id="chat-space-middle-part"],
+[data-element-id="chat-space-end-part"] {
+  background-color: ${C.chatArea} !important;
+  background-image: none !important;
+}
 
-  const log = (...a) => { if (CFG.debug) console.log('%c[tm-dark]', 'color:#7aa2f7', ...a); };
+/* 5. Scroll indicator: one flat color, no gradient */
+[data-element-id="chat-space-beginning-part"] [class*="bg-gradient-to"],
+[data-element-id="chat-space-middle-part"] [class*="bg-gradient-to"],
+[data-element-id="chat-space-end-part"] [class*="bg-gradient-to"] {
+  background-image: none !important;
+  background-color: ${C.fade} !important;
+}
+`;
 
-  /* ---------------------------- COLOUR MATHS ---------------------------- */
-
-  function parseRGB(str) {
-    const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,/\s]+([\d.]+))?/i.exec(str || '');
-    if (!m) return null;
-    return {
-      r: parseFloat(m[1]),
-      g: parseFloat(m[2]),
-      b: parseFloat(m[3]),
-      a: m[4] === undefined ? 1 : parseFloat(m[4])
-    };
-  }
-
-  function isNavy(str) {
-    const c = parseRGB(str);
-    if (!c) return false;
-    if (c.a < 0.15) return false;                                  // transparent, leave it
-    if (Math.max(c.r, c.g, c.b) > CFG.maxChannel) return false;    // too bright, not the shell
-    if (c.b - c.r < CFG.blueBias) return false;                    // not blue-tinted
-    if (c.b - c.g < Math.round(CFG.blueBias / 2)) return false;    // not blue-tinted
-    return true;
-  }
-
-  /* ------------------------------ STATIC CSS ---------------------------- */
-  /* Runs first so there is no navy flash before the sweep lands. */
-
-  function injectCSS() {
-    const old = document.getElementById(STYLE_ID);
-    if (old) old.remove();
-
-    const borderRules = CFG.recolorBorders
-      ? `
-      [data-element-id="chat-space-end-part"] div[class*="border-slate-"],
-      .pb-safe div[class*="border-slate-"] {
-        border-color: ${CFG.borderColor} !important;
-      }`
-      : '';
-
-    const css = `
-      /* typing area */
-      [data-element-id="chat-space-end-part"] textarea,
-      [data-element-id="chat-input-textbox"],
-      [data-element-id="chat-input-textbox"] textarea,
-      .pb-safe textarea,
-      .pb-safe [contenteditable="true"] {
-        background-color: ${CFG.inputBg} !important;
-      }
-
-      /* input shell and any slate-tinted panel behind the buttons */
-      [data-element-id="chat-space-end-part"] div[class*="bg-slate-"],
-      [data-element-id="chat-space-end-part"] div[class*="bg-gray-9"],
-      [data-element-id="chat-space-end-part"] div[class*="bg-zinc-9"],
-      .pb-safe div[class*="bg-slate-"],
-      .pb-safe .bg-slate-100 {
-        background-color: ${CFG.boxBg} !important;
-      }
-      ${borderRules}
-    `;
-
-    const el = document.createElement('style');
-    el.id = STYLE_ID;
-    el.textContent = css;
-    (document.head || document.documentElement).appendChild(el);
-    log('css injected');
-  }
-
-  /* ------------------------------- SWEEP -------------------------------- */
-
-  function getScopes() {
-    const set = new Set();
-    document.querySelectorAll(SCOPE_SELECTOR).forEach(el => set.add(el));
-
-    // Fallback for when TypingMind renames its data-element-id values:
-    // climb six levels up from every textarea on the page.
-    if (!set.size) {
-      document.querySelectorAll('textarea').forEach(ta => {
-        let n = ta;
-        for (let i = 0; i < 6 && n.parentElement; i++) n = n.parentElement;
-        set.add(n);
-      });
+  function inject() {
+    let el = document.getElementById(STYLE_ID);
+    if (!el) {
+      el = document.createElement('style');
+      el.id = STYLE_ID;
+      (document.head || document.documentElement).appendChild(el);
     }
-    return Array.from(set);
+    const next = css();
+    if (el.textContent !== next) el.textContent = next;
+    return el;
   }
 
-  function paint(el) {
-    if (!(el instanceof HTMLElement)) return;
-    if (SKIP_TAGS.has(el.tagName)) return;
-
-    // Already handled and our inline style survived the last React render.
-    if (el.getAttribute(PAINTED) === '1' && el.style.backgroundColor) return;
-
-    const cs = getComputedStyle(el);
-    let touched = false;
-
-    if (TYPE_TAGS.has(el.tagName) || el.isContentEditable) {
-      el.style.setProperty('background-color', CFG.inputBg, 'important');
-      touched = true;
-    } else if (isNavy(cs.backgroundColor)) {
-      el.style.setProperty('background-color', CFG.boxBg, 'important');
-      touched = true;
-    }
-
-    if (CFG.recolorBorders &&
-        parseFloat(cs.borderTopWidth) > 0 &&
-        isNavy(cs.borderTopColor)) {
-      el.style.setProperty('border-color', CFG.borderColor, 'important');
-      touched = true;
-    }
-
-    if (touched) {
-      el.setAttribute(PAINTED, '1');
-      log('repainted', el.tagName, el.getAttribute('data-element-id') || el.className, cs.backgroundColor);
-    }
-  }
-
-  function sweep() {
-    if (!alive) return;
-    const scopes = getScopes();
-    for (const root of scopes) {
-      paint(root);
-      const kids = root.querySelectorAll('*');
-      if (kids.length > 4000) continue;   // guard against a runaway scope
-      for (let i = 0; i < kids.length; i++) paint(kids[i]);
-    }
-  }
-
-  function schedule() {
-    if (!alive) return;
-    clearTimeout(timer);
-    timer = setTimeout(sweep, CFG.debounceMs);
-  }
-
-  /* ---------------------------- EVENT WIRING ---------------------------- */
-
-  function onClick() { schedule(); }
-  function onKeyUp(e) { if (e.key === 'Enter') schedule(); }
-  function onResize() { schedule(); }
-
-  function start() {
-    if (alive) return;
-    alive = true;
-
-    injectCSS();
-    sweep();
-
-    // Late hydration passes. Next.js swaps class names after first paint.
-    [300, 1000, 3000, 6000].forEach(ms => setTimeout(() => { if (alive) sweep(); }, ms));
-
-    observer = new MutationObserver(schedule);
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-
-    document.addEventListener('click', onClick, true);
-    document.addEventListener('keyup', onKeyUp, true);
-    window.addEventListener('resize', onResize);
-
-    log('started');
-  }
-
-  function stop() {
-    alive = false;
-    clearTimeout(timer);
-
-    if (observer) { observer.disconnect(); observer = null; }
-    document.removeEventListener('click', onClick, true);
-    document.removeEventListener('keyup', onKeyUp, true);
-    window.removeEventListener('resize', onResize);
-
-    const style = document.getElementById(STYLE_ID);
-    if (style) style.remove();
-
-    document.querySelectorAll('[' + PAINTED + ']').forEach(el => {
-      el.style.removeProperty('background-color');
-      el.style.removeProperty('border-color');
-      el.removeAttribute(PAINTED);
-    });
-
-    if (probing) toggleProbe();
-    log('stopped and reverted');
-  }
-
-  /* ------------------------------- PROBE -------------------------------- */
-  /* tmDark.probe() then hover the mystery element. Details go to console. */
-
-  function onProbeOver(e) {
-    const el = e.target;
-    if (!(el instanceof HTMLElement)) return;
-    el.dataset.tmPrevOutline = el.style.outline || '';
-    el.style.outline = '2px solid #ff3b3b';
-    const cs = getComputedStyle(el);
-    console.log('[tm-probe]', {
-      tag: el.tagName,
-      elementId: el.getAttribute('data-element-id') || null,
-      classes: typeof el.className === 'string' ? el.className : String(el.className),
-      background: cs.backgroundColor,
-      border: cs.borderColor,
-      readsAsNavy: isNavy(cs.backgroundColor),
-      node: el
-    });
-  }
-
-  function onProbeOut(e) {
-    const el = e.target;
-    if (!(el instanceof HTMLElement)) return;
-    el.style.outline = el.dataset.tmPrevOutline || '';
-    delete el.dataset.tmPrevOutline;
-  }
-
-  function toggleProbe() {
-    if (probing) {
-      document.removeEventListener('mouseover', onProbeOver, true);
-      document.removeEventListener('mouseout', onProbeOut, true);
-      probing = false;
-      console.log('[tm-dark] probe OFF');
-    } else {
-      document.addEventListener('mouseover', onProbeOver, true);
-      document.addEventListener('mouseout', onProbeOut, true);
-      probing = true;
-      console.log('[tm-dark] probe ON - hover the navy strip, then read the log');
-    }
-    return probing;
-  }
-
-  /* -------------------------------- API --------------------------------- */
-
-  // Clean up a previous copy if the extension gets loaded twice.
-  if (window.tmDark && typeof window.tmDark.off === 'function') {
-    try { window.tmDark.off(); } catch (err) { /* previous version already gone */ }
-  }
-
-  window.tmDark = {
-    on: start,
-    off: stop,
-    sweep: sweep,
-    probe: toggleProbe,
-    set: function (key, value) {
-      if (!(key in CFG)) {
-        console.warn('[tm-dark] unknown setting:', key, '- valid keys:', Object.keys(CFG).join(', '));
-        return false;
-      }
-      CFG[key] = value;
-      document.querySelectorAll('[' + PAINTED + ']').forEach(el => el.removeAttribute(PAINTED));
-      injectCSS();
-      sweep();
-      console.log('[tm-dark]', key, '=', value);
-      return true;
-    },
-    config: CFG,
-    version: '1.0'
-  };
-
-  /* -------------------------------- BOOT -------------------------------- */
-
+  inject();
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start, { once: true });
-  } else {
-    start();
+    document.addEventListener('DOMContentLoaded', inject, { once: true });
   }
+
+  /* Head-only observer. Cheap, and it re-adds the tag if TypingMind wipes it. */
+  const headObserver = new MutationObserver(() => {
+    if (!document.getElementById(STYLE_ID)) inject();
+  });
+  (function start() {
+    if (document.head) headObserver.observe(document.head, { childList: true });
+    else requestAnimationFrame(start);
+  })();
+
+  const classOf = (el) => {
+    const c = el.className;
+    if (c && typeof c === 'object' && 'baseVal' in c) return c.baseVal;
+    return String(c || '');
+  };
+
+  const describe = (el) => ({
+    tag: el.tagName.toLowerCase(),
+    id: el.id || '',
+    elementId: el.getAttribute('data-element-id') || '',
+    cls: classOf(el).slice(0, 90)
+  });
+
+  window.tmTheme = {
+    on: inject,
+
+    off() {
+      const el = document.getElementById(STYLE_ID);
+      if (el) el.remove();
+      headObserver.disconnect();
+    },
+
+    set(key, value) {
+      if (!(key in C)) {
+        console.warn('[tmTheme] unknown key:', key, '| valid:', Object.keys(C).join(', '));
+        return;
+      }
+      C[key] = value;
+      inject();
+    },
+
+    /* Which selectors actually match anything on your build */
+    audit() {
+      const sels = css()
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('}')
+        .map(b => b.split('{')[0].trim())
+        .filter(Boolean)
+        .flatMap(s => s.split(',').map(x => x.trim()))
+        .filter(Boolean);
+
+      const rows = [...new Set(sels)].map(sel => {
+        const probe = sel.replace(/::?[a-z-]+$/i, '');
+        let matches;
+        try { matches = document.querySelectorAll(probe).length; }
+        catch (e) { matches = 'invalid'; }
+        return { selector: sel, matches };
+      });
+
+      console.table(rows.sort((a, b) => (Number(b.matches) || 0) - (Number(a.matches) || 0)));
+      return rows;
+    },
+
+    /* Find every element still painted navy-ish */
+    findNavy() {
+      const hits = [];
+      document.querySelectorAll('*').forEach(el => {
+        const bg = getComputedStyle(el).backgroundColor;
+        const m = bg.match(/\d+(\.\d+)?/g);
+        if (!m || m.length < 3) return;
+        const [r, g, b] = m.map(Number);
+        const alpha = m.length > 3 ? Number(m[3]) : 1;
+        if (alpha < 0.1) return;
+        if (b > 40 && b - r > 15 && b - g > 10 && (r + g + b) / 3 < 150) {
+          hits.push({ ...describe(el), bg });
+        }
+      });
+      console.table(hits);
+      return hits;
+    },
+
+    /* Find every element still running a gradient */
+    findGradients() {
+      const hits = [];
+      document.querySelectorAll('*').forEach(el => {
+        const bi = getComputedStyle(el).backgroundImage;
+        if (bi && bi.includes('gradient')) {
+          hits.push({ ...describe(el), image: bi.slice(0, 100) });
+        }
+      });
+      console.table(hits);
+      return hits;
+    }
+  };
+
+  console.log('[tmTheme] loaded. Try tmTheme.audit()');
 })();
