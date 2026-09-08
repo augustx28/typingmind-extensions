@@ -236,6 +236,7 @@
     init();
   }
 })();
+/* SEARCH BAR COLOR */
 (() => {
   const styleId = 'typingmind-search-bar-color';
 
