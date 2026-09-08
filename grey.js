@@ -2,8 +2,8 @@
   const STYLE_ID = 'tm-dark-gray-patch';
 
   const INPUT_BG = '#100f0f'; // textarea / input line
-  const BOX_BG   = '#131212'; // input box container + chat area
-  const FADE_BG  = '#131212'; // scroll indicator, single flat color
+  const BOX_BG   = '#100f0f'; // input box container (was #131212)
+  const FADE_BG  = '#100f0f'; // scroll indicator, single flat color
 
   const css = `
 /* ================= Input (textarea) ================= */
