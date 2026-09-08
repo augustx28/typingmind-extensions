@@ -1,37 +1,45 @@
-(function () {
-  const STYLE_ID = 'tm-search-bar-color';
-  const SEARCH_BG = '#131212'; // change this one value
+(() => {
+  "use strict";
+
+  const styleId = "typingmind-dark-gray-theme";
 
   const css = `
-[data-element-id="search-chats-bar"] {
-  background-color: ${SEARCH_BG} !important;
-}
+    /* Search bar */
+    .dark [data-element-id="search-chats-bar"] {
+      background-color: #131313 !important;
+    }
 
-[data-element-id="search-chats-bar"] input,
-[data-element-id="search-chats-bar"] > div,
-input[data-element-id="search-chats-bar"] {
-  background-color: ${SEARCH_BG} !important;
-}
-`;
+    /* Chat input box */
+    .dark [data-element-id="chat-space-end-part"] > .bg-slate-100 {
+      background-color: #181717 !important;
+    }
 
-  function inject() {
-    const old = document.getElementById(STYLE_ID);
-    if (old) old.remove();
+    /* Fix the navy fade beside Send */
+    .dark [data-element-id="chat-input-actions"]
+      .scroll-indicator-gradient::after {
+      background: linear-gradient(
+        to right,
+        rgba(24, 23, 23, 0),
+        #181717
+      ) !important;
+    }
+  `;
 
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
+  function install() {
+    let style = document.getElementById(styleId);
+
+    if (!style) {
+      style = document.createElement("style");
+      style.id = styleId;
+      (document.head || document.documentElement).appendChild(style);
+    }
+
     style.textContent = css;
-    (document.head || document.documentElement).appendChild(style);
   }
 
-  if (document.head) {
-    inject();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", install, { once: true });
   } else {
-    document.addEventListener('DOMContentLoaded', inject, { once: true });
+    install();
   }
-
-  const target = document.head || document.documentElement;
-  new MutationObserver(() => {
-    if (!document.getElementById(STYLE_ID)) inject();
-  }).observe(target, { childList: true });
 })();
