@@ -1,39 +1,16 @@
 (function () {
-  const STYLE_ID = 'tm-dark-gray-patch';
-
-  const INPUT_BG = '#100f0f'; // textarea / input line
-  const BOX_BG   = '#100f0f'; // input box container (was #131212)
-  const FADE_BG  = '#100f0f'; // scroll indicator, single flat color
+  const STYLE_ID = 'tm-search-bar-color';
+  const SEARCH_BG = '#131212'; // change this one value
 
   const css = `
-/* ================= Input (textarea) ================= */
-.jsx-7078ffb922cb3c38 .leading-normal,
-[data-element-id="chat-input-textbox"] {
-  background-color: ${INPUT_BG} !important;
+[data-element-id="search-chats-bar"] {
+  background-color: ${SEARCH_BG} !important;
 }
 
-/* ================= Input box container ================= */
-.pb-safe .bg-slate-100 {
-  background-color: ${BOX_BG} !important;
-}
-
-/* ================= Scroll indicator: no gradient, one color ================= */
-/* Case 1: gradient applied as a mask on the container */
-.scroll-indicator-gradient {
-  -webkit-mask-image: none !important;
-          mask-image: none !important;
-  background-image: none !important;
-  background-color: ${FADE_BG} !important;
-}
-
-/* Case 2: gradient applied via a pseudo-element strip */
-.scroll-indicator-gradient::before,
-.scroll-indicator-gradient::after {
-  background-image: none !important;
-  background: none !important;
-  -webkit-mask-image: none !important;
-          mask-image: none !important;
-  content: none !important;
+[data-element-id="search-chats-bar"] input,
+[data-element-id="search-chats-bar"] > div,
+input[data-element-id="search-chats-bar"] {
+  background-color: ${SEARCH_BG} !important;
 }
 `;
 
@@ -53,7 +30,6 @@
     document.addEventListener('DOMContentLoaded', inject, { once: true });
   }
 
-  // Re-inject if something wipes the tag out of <head>
   const target = document.head || document.documentElement;
   new MutationObserver(() => {
     if (!document.getElementById(STYLE_ID)) inject();
