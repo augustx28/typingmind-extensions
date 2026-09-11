@@ -431,41 +431,41 @@
 
       #${PANEL_ID} .outline-item[data-level="1"] {
         padding-left: 14px;
-        font-weight: 800;
-        font-size: 13px;
+        font-weight: 700;
+        font-size: 12px;
       }
 
       #${PANEL_ID} .outline-item[data-level="2"] {
         padding-left: 25px;
-        font-weight: 700;
-        font-size: 12.5px;
-        color: #56534f;
+        font-weight: 600;
+        font-size: 11.5px;
+        color: #57534f;
       }
 
       #${PANEL_ID} .outline-item[data-level="3"] {
         padding-left: 36px;
-        font-weight: 600;
-        font-size: 12px;
-        color: #686560;
+        font-weight: 500;
+        font-size: 11px;
+        color: #69645f;
       }
 
       #${PANEL_ID} .outline-item[data-level="4"] {
         padding-left: 47px;
-        font-weight: 500;
-        font-size: 11.5px;
-        color: #77736d;
+        font-weight: 400;
+        font-size: 10.5px;
+        color: #7a746e;
       }
 
       .dark #${PANEL_ID} .outline-item[data-level="2"] {
-        color: #c1beb8;
+        color: #c5c1bc;
       }
 
       .dark #${PANEL_ID} .outline-item[data-level="3"] {
-        color: #aea9a2;
+        color: #ada8a2;
       }
 
       .dark #${PANEL_ID} .outline-item[data-level="4"] {
-        color: #99948d;
+        color: #96908a;
       }
 
       /* Model icon */
