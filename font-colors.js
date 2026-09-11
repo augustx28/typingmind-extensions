@@ -20,7 +20,7 @@
  * reasoning blocks keep TypingMind's default look.
  *
  * Live tweaking from the desktop console (lasts until reload):
- *   tmTextColors.set({ h2: '#E8A58C', bold: '#CFCBC0' })
+ *   tmTextColors.set({ h2: '#E8A58C', bold: '#FFFFFF' })
  *   tmTextColors.get()     show current colors
  *   tmTextColors.reset()   back to the COLORS block below
  *   tmTextColors.off()     remove all styling
@@ -45,7 +45,7 @@
     h5: '#C0BCB1',   // deeper warm gray
     h6: '#B0AEA5',   // Anthropic mid gray
     text: '#D6D3CA', // paragraphs, list items, table cells
-    bold: '#CFCBC0'  // Claude clay orange. Lighter version: '#CFCBC0'
+    bold: '#FFFFFF'  // Claude clay orange. Lighter version: '#FFFFFF'
   };
 
   // '.dark' limits styling to dark mode, so a white H1 never lands on a
