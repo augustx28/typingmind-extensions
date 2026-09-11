@@ -45,7 +45,7 @@
     h5: '#C0BCB1',   // deeper warm gray
     h6: '#B0AEA5',   // Anthropic mid gray
     text: '#D6D3CA', // paragraphs, list items, table cells
-    bold: '#D97757'  // Claude clay orange. Lighter version: '#E1947A'
+    bold: '#B0AEA5'  // Claude clay orange. Lighter version: '#E1947A'
   };
 
   // '.dark' limits styling to dark mode, so a white H1 never lands on a
