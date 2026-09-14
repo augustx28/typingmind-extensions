@@ -1,0 +1,3360 @@
+/* =====================================================================
+ * TypingMind Persistent Highlighter
+ * Version 3.4.0
+ *
+ * New in 3.4.0
+ *  - Highlight text wraps in full inside the panel. Nothing is cut off.
+ *  - Highlights panel rebuilt for phones: taller sheet, real drag handle,
+ *    scrollable filter row, larger tap targets, safe-area padding.
+ *  - All chats view groups highlights under sticky chat headers.
+ *  - Slimmer vertical selection bar. Three-dot menu moved to the top,
+ *    drag grip moved to the bottom.
+ *  - Clearer icons on every panel action, filter, and footer button.
+ *  - GitHub sync accepts public repositories and warns once instead of
+ *    refusing to sync.
+ *
+ * Carried over from 3.3.x
+ *  - Uses Inter throughout the Highlights panel.
+ *  - The selection bar stays draggable and remembers its position.
+ *  - Keeps all highlights, notes, settings, imports, and exports.
+ *  - Hides the floating launcher completely when Full size button is off.
+ *  - Uses the same mobile sidebar visibility method as Page Outline v4.2.
+ * ===================================================================== */
+
+(() => {
+  "use strict";
+
+  const VERSION = "3.4.0";
+  const FLAG = "__TM_HIGHLIGHTER_V3__";
+
+  const rank = (value) =>
+    String(value || "0")
+      .split(".")
+      .reduce((total, part) => total * 1000 + (Number(part) || 0), 0);
+
+  const prior = window[FLAG] || window["**TM_HIGHLIGHTER_V3**"];
+
+  if (prior && prior.loaded) {
+    if (rank(prior.version) < rank(VERSION)) {
+      console.warn(
+        `[TM Highlighter] v${prior.version} is already running. Reload TypingMind to start v${VERSION}.`
+      );
+    }
+    return;
+  }
+
+  window[FLAG] = { loading: true, version: VERSION };
+
+  /* ------------------------------------------------------------------
+   * Constants
+   * ---------------------------------------------------------------- */
+
+  const LS_DATA = "tm-highlights-v3";
+  const LS_SETTINGS = "tm-highlights-v3-settings";
+  const LEGACY_KEY = "typingmind-persistent-highlights-v2";
+  const CHANNEL_NAME = "tm-highlights-v3-bus";
+  const LS_SYNC = "tm-highlights-v3-github";
+  const SYNC_FILE = "typingmind-highlights.json";
+  const TOMBSTONE_TTL_MS = 45 * 24 * 60 * 60 * 1000;
+  const MOBILE_BREAKPOINT = 820;
+  const SIDEBAR_BREAKPOINT = 768;
+
+  const COLORS = ["yellow", "green", "blue", "pink", "purple"];
+
+  const COLOR_LABEL = {
+    yellow: "Yellow",
+    green: "Green",
+    blue: "Blue",
+    pink: "Pink",
+    purple: "Purple"
+  };
+
+  const ROOT_SELECTORS = [
+    '[data-element-id="response-block"]',
+    '[data-element-id="ai-response"]',
+    '[data-element-id="user-message"]'
+  ];
+
+  const CHAT_SIGNAL_SELECTORS = [
+    '[data-element-id="chat-space-middle-part"]',
+    '[data-element-id="chat-space"]',
+    '[data-element-id="chat-input-textbox"]',
+    '[data-element-id="user-message"]',
+    '[data-element-id="ai-response"]',
+    'textarea[placeholder*="message" i]'
+  ];
+
+  const MOBILE_SIDEBAR_SELECTORS = [
+    '[data-element-id="side-bar"]',
+    '[data-element-id="sidebar"]',
+    '[data-element-id="side-bar-background"]',
+    '[data-element-id="sidebar-background"]'
+  ];
+
+  const MOBILE_SIDEBAR_SELECTOR = MOBILE_SIDEBAR_SELECTORS.join(", ");
+  const MARK_SELECTOR = "mark.tmhl-mark";
+
+  const SKIP_TEXT_SELECTOR = [
+    "script",
+    "style",
+    "noscript",
+    "button",
+    "select",
+    "textarea",
+    "input",
+    '[role="button"]',
+    '[aria-hidden="true"]',
+    ".katex-mathml",
+    "[data-tmhl-ui]"
+  ].join(", ");
+
+  const DEFAULT_SETTINGS = {
+    settingsVersion: 4,
+    defaultColor: "yellow",
+    launcherMode: "full",
+    autoHideMobileLauncher: true,
+    seenIntro: false,
+    launcher: { xPct: 0.93, yPct: 0.6 },
+    toolbar: { pinned: false, xPct: 0.5, yPct: 0.35 }
+  };
+
+  /* ------------------------------------------------------------------
+   * Utilities
+   * ---------------------------------------------------------------- */
+
+  const now = () => Date.now();
+
+  function makeId() {
+    if (window.crypto && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+
+    return [
+      Date.now().toString(36),
+      Math.random().toString(36).slice(2),
+      Math.random().toString(36).slice(2)
+    ].join("-");
+  }
+
+  function hashText(text) {
+    let hash = 2166136261;
+
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+
+    return `${(hash >>> 0).toString(36)}:${text.length}`;
+  }
+
+  function debounce(fn, wait) {
+    let timer = 0;
+
+    return (...args) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => fn(...args), wait);
+    };
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(value, max));
+  }
+
+  function structuredCopy(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function relativeTime(iso) {
+    const stamp = Date.parse(iso);
+
+    if (!Number.isFinite(stamp)) return "";
+
+    const difference = Math.max(0, now() - stamp);
+    const minute = 60000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+
+    if (difference < minute) return "just now";
+    if (difference < hour) return `${Math.floor(difference / minute)}m ago`;
+    if (difference < day) return `${Math.floor(difference / hour)}h ago`;
+    if (difference < 7 * day) return `${Math.floor(difference / day)}d ago`;
+
+    return new Date(stamp).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric"
+    });
+  }
+
+  function viewportBounds() {
+    const viewport = window.visualViewport;
+    const left = viewport ? viewport.offsetLeft : 0;
+    const top = viewport ? viewport.offsetTop : 0;
+    const width = viewport ? viewport.width : window.innerWidth;
+    const height = viewport ? viewport.height : window.innerHeight;
+
+    return {
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height
+    };
+  }
+
+  function isTouch() {
+    return window.matchMedia("(pointer: coarse)").matches;
+  }
+
+  function isNarrow() {
+    return viewportBounds().width <= MOBILE_BREAKPOINT;
+  }
+
+  function isOnVisibleChatPage() {
+    const hasChat = CHAT_SIGNAL_SELECTORS.some((selector) =>
+      Boolean(document.querySelector(selector))
+    );
+
+    if (!hasChat) return false;
+
+    if (window.innerWidth <= SIDEBAR_BREAKPOINT) {
+      for (const selector of MOBILE_SIDEBAR_SELECTORS) {
+        const sidebar = document.querySelector(selector);
+
+        if (!sidebar) continue;
+
+        const style = window.getComputedStyle(sidebar);
+        const rect = sidebar.getBoundingClientRect();
+
+        if (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity || 1) !== 0 &&
+          rect.width > 100 &&
+          rect.right > 0 &&
+          rect.left < window.innerWidth
+        ) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("data-tmhl-ui", "true");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+
+        document.body.appendChild(area);
+        area.select();
+
+        const success = document.execCommand("copy");
+        area.remove();
+
+        return success;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  function downloadFile(name, text, mime) {
+    const blob = new Blob([text], { type: mime || "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = name;
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  function el(tag, props, children) {
+    const node = document.createElement(tag);
+
+    if (props) {
+      Object.entries(props).forEach(([key, value]) => {
+        if (value === undefined || value === null) return;
+
+        if (key === "class") {
+          node.className = value;
+        } else if (key === "text") {
+          node.textContent = value;
+        } else if (key === "html") {
+          node.innerHTML = value;
+        } else if (key.startsWith("on") && typeof value === "function") {
+          node.addEventListener(key.slice(2).toLowerCase(), value);
+        } else {
+          node.setAttribute(key, value);
+        }
+      });
+    }
+
+    (children || []).forEach((child) => {
+      if (child) node.appendChild(child);
+    });
+
+    return node;
+  }
+
+  /* ------------------------------------------------------------------
+   * Settings
+   * ---------------------------------------------------------------- */
+
+  let settings = loadSettings();
+
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem(LS_SETTINGS);
+
+      if (!raw) return structuredCopy(DEFAULT_SETTINGS);
+
+      const parsed = JSON.parse(raw);
+      const merged = {
+        ...structuredCopy(DEFAULT_SETTINGS),
+        ...parsed,
+        launcher: {
+          ...DEFAULT_SETTINGS.launcher,
+          ...(parsed.launcher || {})
+        },
+        toolbar: {
+          ...DEFAULT_SETTINGS.toolbar,
+          ...(parsed.toolbar || {})
+        }
+      };
+
+      if (!parsed.settingsVersion) {
+        merged.launcherMode = parsed.showLauncher === false ? "off" : "full";
+        delete merged.showLauncher;
+      } else if (merged.launcherMode === "mini") {
+        merged.launcherMode = "off";
+      }
+
+      if (merged.launcherMode !== "off") {
+        merged.launcherMode = "full";
+      }
+
+      merged.autoHideMobileLauncher =
+        parsed.autoHideMobileLauncher !== false;
+
+      const launcherPosition = merged.launcher || {};
+
+      if (
+        !Number.isFinite(launcherPosition.xPct) ||
+        !Number.isFinite(launcherPosition.yPct)
+      ) {
+        merged.launcher = {
+          xPct: launcherPosition.side === "left" ? 0.07 : 0.93,
+          yPct: Number.isFinite(launcherPosition.topPct)
+            ? launcherPosition.topPct
+            : 0.6
+        };
+      }
+
+      const toolbarPosition = merged.toolbar || {};
+
+      merged.toolbar = {
+        pinned: Boolean(toolbarPosition.pinned),
+        xPct: Number.isFinite(toolbarPosition.xPct)
+          ? clamp(toolbarPosition.xPct, 0, 1)
+          : 0.5,
+        yPct: Number.isFinite(toolbarPosition.yPct)
+          ? clamp(toolbarPosition.yPct, 0, 1)
+          : 0.35
+      };
+
+      merged.settingsVersion = 4;
+      return merged;
+    } catch {
+      return structuredCopy(DEFAULT_SETTINGS);
+    }
+  }
+
+  function saveSettings() {
+    try {
+      localStorage.setItem(LS_SETTINGS, JSON.stringify(settings));
+    } catch (error) {
+      console.warn("[TM Highlighter] Settings not saved.", error);
+    }
+  }
+
+  /* ------------------------------------------------------------------
+   * Store
+   * ---------------------------------------------------------------- */
+
+  let store = loadStore();
+  let bus = null;
+  let chatHighlightCache = {
+    store: null,
+    updatedAt: -1,
+    chatId: null,
+    hasHighlights: false
+  };
+
+  function emptyStore() {
+    return { version: 3, updatedAt: 0, items: [] };
+  }
+
+  function validRecord(record) {
+    return Boolean(
+      record &&
+        typeof record.id === "string" &&
+        typeof record.chatId === "string" &&
+        typeof record.exact === "string" &&
+        record.exact.length > 0 &&
+        Number.isFinite(record.start) &&
+        Number.isFinite(record.end)
+    );
+  }
+
+  function normalizeRecord(record) {
+    return {
+      id: record.id,
+      chatId: record.chatId,
+      chatTitle: record.chatTitle || "",
+      color: COLORS.includes(record.color) ? record.color : "yellow",
+      exact: record.exact,
+      note: typeof record.note === "string" ? record.note : "",
+      prefix: record.prefix || "",
+      suffix: record.suffix || "",
+      start: record.start,
+      end: record.end,
+      messageIndex: Number.isFinite(record.messageIndex)
+        ? record.messageIndex
+        : -1,
+      messageHash: record.messageHash || "",
+      createdAt: record.createdAt || new Date().toISOString(),
+      updatedAt:
+        Number.isFinite(record.updatedAt)
+          ? record.updatedAt
+          : Date.parse(record.createdAt || "") || now(),
+      deleted: Boolean(record.deleted)
+    };
+  }
+
+  function loadStore() {
+    let documentStore = emptyStore();
+
+    try {
+      const raw = localStorage.getItem(LS_DATA);
+
+      if (raw) {
+        const parsed = JSON.parse(raw);
+
+        if (parsed && Array.isArray(parsed.items)) {
+          documentStore = {
+            version: 3,
+            updatedAt: Number(parsed.updatedAt) || 0,
+            items: parsed.items.filter(validRecord).map(normalizeRecord)
+          };
+        }
+      }
+    } catch (error) {
+      console.warn("[TM Highlighter] Could not read storage.", error);
+    }
+
+    if (!documentStore.items.length) {
+      const migrated = migrateLegacy();
+
+      if (migrated.length) {
+        documentStore.items = migrated;
+        documentStore.updatedAt = now();
+      }
+    }
+
+    return documentStore;
+  }
+
+  function migrateLegacy() {
+    try {
+      const raw = localStorage.getItem(LEGACY_KEY);
+      if (!raw) return [];
+
+      const parsed = JSON.parse(raw);
+      const items = Array.isArray(parsed) ? parsed : parsed && parsed.items;
+      if (!Array.isArray(items)) return [];
+
+      const mapped = items.filter(validRecord).map(normalizeRecord);
+
+      if (mapped.length) {
+        console.info(
+          `[TM Highlighter] Migrated ${mapped.length} highlights from v2.`
+        );
+      }
+
+      return mapped;
+    } catch {
+      return [];
+    }
+  }
+
+  function liveItems() {
+    return store.items.filter((item) => !item.deleted);
+  }
+
+  function itemsForChat(chatId) {
+    if (!chatId) return [];
+    return liveItems().filter((item) => item.chatId === chatId);
+  }
+
+  function currentChatHasHighlights(chatId) {
+    if (
+      chatHighlightCache.store === store &&
+      chatHighlightCache.updatedAt === store.updatedAt &&
+      chatHighlightCache.chatId === chatId
+    ) {
+      return chatHighlightCache.hasHighlights;
+    }
+
+    const hasHighlights = Boolean(
+      chatId &&
+        store.items.some(
+          (item) => !item.deleted && item.chatId === chatId
+        )
+    );
+
+    chatHighlightCache = {
+      store,
+      updatedAt: store.updatedAt,
+      chatId,
+      hasHighlights
+    };
+
+    return hasHighlights;
+  }
+
+  function findRecord(id) {
+    return store.items.find((item) => item.id === id) || null;
+  }
+
+  function pruneTombstones() {
+    // Keep deletion records so a device returning after months offline
+    // cannot bring deleted highlights back through sync.
+    return false;
+  }
+
+  function persist(options) {
+    const preferences = options || {};
+    store = mergeDocs(store, loadStore()).doc;
+    store.updatedAt = now();
+    chatHighlightCache.store = null;
+
+    try {
+      localStorage.setItem(LS_DATA, JSON.stringify(store));
+    } catch (error) {
+      console.error("[TM Highlighter] Save failed.", error);
+      toast("Storage is full. Export and clear old highlights.");
+      return false;
+    }
+
+    if (bus && !preferences.silentBus) {
+      try {
+        bus.postMessage({ type: "changed", at: store.updatedAt });
+      } catch {
+        /* Ignore channel errors. */
+      }
+    }
+
+    renderPanel();
+    updateLauncher();
+    if (!preferences.skipCloud) {
+      if (syncConfig && !cloudPaused) syncStatus("Sync pending", "Saved on this device. Waiting to sync.");
+      scheduleCloudSync(1800);
+    }
+    return true;
+  }
+
+  function mergeDocs(local, remote) {
+    const byId = new Map();
+    local.items.forEach((item) => byId.set(item.id, item));
+    let changed = false;
+
+    (remote.items || [])
+      .filter(validRecord)
+      .forEach((raw) => {
+        const incoming = normalizeRecord(raw);
+        const current = byId.get(incoming.id);
+
+        const winner = current ? mergeRecord(current, incoming) : incoming;
+        if (!current || JSON.stringify(winner) !== JSON.stringify(current)) {
+          byId.set(incoming.id, winner);
+          changed = true;
+        }
+      });
+
+    return {
+      changed,
+      doc: {
+        version: 3,
+        updatedAt: Math.max(local.updatedAt || 0, remote.updatedAt || 0),
+        items: Array.from(byId.values())
+      }
+    };
+  }
+
+  function mergeRecord(first, second) {
+    // Deletion wins for an ID because this extension has no undelete action.
+    // Other simultaneous edits use the latest timestamp, with a stable tie break.
+    let winner;
+    if (first.deleted !== second.deleted) winner = first.deleted ? first : second;
+    else if (first.updatedAt !== second.updatedAt) {
+      winner = first.updatedAt > second.updatedAt ? first : second;
+    } else {
+      const key = (item) => JSON.stringify([
+        item.color, item.note, item.exact, item.prefix, item.suffix,
+        item.start, item.end, item.messageIndex, item.messageHash, item.chatTitle
+      ]);
+      winner = key(first) >= key(second) ? first : second;
+    }
+    const other = winner === first ? second : first;
+    // A title repair must never undo a note, color change, or deletion.
+    return { ...winner, chatTitle: cleanChatTitle(winner.chatTitle) ||
+      cleanChatTitle(other.chatTitle) || winner.chatTitle || "" };
+  }
+
+  /* ------------------------------------------------------------------
+   * Chat context
+   * ---------------------------------------------------------------- */
+
+  function currentChatId() {
+    const match = window.location.href.match(/(?:#|[?&])chat=([^&?#]+)/);
+
+    if (match && match[1]) {
+      try {
+        return decodeURIComponent(match[1]);
+      } catch {
+        return match[1];
+      }
+    }
+
+    const selected = document.querySelector(
+      '[data-element-id="selected-chat-item"]'
+    );
+
+    if (selected) {
+      const direct =
+        selected.getAttribute("data-chat-id") || selected.dataset.chatId;
+
+      if (direct) return String(direct);
+
+      const link = selected.matches("a")
+        ? selected
+        : selected.closest("a") || selected.querySelector("a");
+      const href = link && link.getAttribute("href");
+      const hrefMatch = href && href.match(/#chat=([^&?#]+)/);
+
+      if (hrefMatch && hrefMatch[1]) {
+        try {
+          return decodeURIComponent(hrefMatch[1]);
+        } catch {
+          return hrefMatch[1];
+        }
+      }
+    }
+
+    return null;
+  }
+
+  const chatTitleCache = new Map();
+  let titleRefreshAt = 0;
+  let titleRefreshBusy = false;
+  let titleRefreshTimer = 0;
+
+  function cleanChatTitle(value) {
+    if (typeof value !== "string") return "";
+    const title = value.replace(/\s+/g, " ").trim()
+      .replace(/\s*[|·-]\s*Typing\s?Mind.*$/i, "").slice(0, 120);
+    return !title || /^(?:typing\s?mind\b.*|untitled(?: chat)?|new chat)$/i.test(title)
+      ? "" : title;
+  }
+
+  function titleFromChatData(value, chatId) {
+    try {
+      const chat = typeof value === "string" ? JSON.parse(value) : value;
+      if (!chat || typeof chat !== "object" || chat.deletedAt) return "";
+      const id = chat.chatID || chat.chatId || chat.id;
+      if (id && String(id) !== chatId) return "";
+      return cleanChatTitle(chat.chatTitle) || cleanChatTitle(chat.title);
+    } catch { return ""; }
+  }
+
+  function storedChatTitle(chatId) {
+    if (!chatId) return "";
+    try {
+      return titleFromChatData(localStorage.getItem(`CHAT_${chatId}`), chatId);
+    } catch { return ""; }
+  }
+
+  function domChatTitle() {
+    const selected = document.querySelector('[data-element-id="selected-chat-item"]');
+    if (selected) {
+      const selectedId = selected.getAttribute("data-chat-id");
+      if (!selectedId || selectedId === currentChatId()) {
+        const textNode = selected.querySelector('[data-element-id="chat-item-title"], .truncate');
+        const title = cleanChatTitle((textNode || selected).textContent);
+        if (title) return title;
+      }
+    }
+    return cleanChatTitle(document.title);
+  }
+
+  function currentChatTitle() {
+    const chatId = currentChatId();
+    const saved = store.items.find(item => item.chatId === chatId && cleanChatTitle(item.chatTitle));
+    return chatTitleCache.get(chatId) || storedChatTitle(chatId) ||
+      (saved && cleanChatTitle(saved.chatTitle)) || domChatTitle() || "Untitled chat";
+  }
+
+  // Only reads TypingMind's CHAT_ records. Never modifies its database.
+  async function readIndexedChatTitles(chatIds) {
+    const found = new Map();
+    if (!window.indexedDB || !chatIds.length) return found;
+    let names = ["keyval-store"];
+    if (typeof indexedDB.databases === "function") {
+      try {
+        names = (await indexedDB.databases()).map(db => db.name)
+          .filter(name => name && /^(?:keyval-store|typingmind.*)$/i.test(name));
+      } catch { /* Older browsers use the default idb-keyval database. */ }
+    }
+    for (const name of names) {
+      await new Promise(resolve => {
+        let db = null;
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          if (db) db.close();
+          resolve();
+        };
+        const timeout = setTimeout(finish, 2500);
+        let request;
+        try { request = indexedDB.open(name); } catch { finish(); return; }
+        // Abort rather than create an empty database on a different app version.
+        request.onupgradeneeded = () => { request.transaction.abort(); };
+        request.onerror = finish;
+        request.onblocked = finish;
+        request.onsuccess = () => {
+          db = request.result;
+          if (finished) { db.close(); return; }
+          const stores = Array.from(db.objectStoreNames)
+            .filter(value => /^(?:keyval|chats?|store)$/i.test(value));
+          if (!stores.length) { finish(); return; }
+          try {
+            const tx = db.transaction(stores, "readonly");
+            tx.oncomplete = finish;
+            tx.onerror = finish;
+            tx.onabort = finish;
+            for (const storeName of stores) {
+              const objectStore = tx.objectStore(storeName);
+              for (const id of chatIds) {
+                const get = objectStore.get(`CHAT_${id}`);
+                get.onsuccess = () => {
+                  const title = titleFromChatData(get.result, id);
+                  if (title) found.set(id, title);
+                };
+              }
+            }
+          } catch { finish(); }
+        };
+      });
+    }
+    return found;
+  }
+
+  async function refreshChatTitles(force) {
+    if (titleRefreshBusy || (!force && now() - titleRefreshAt < 5000)) return;
+    titleRefreshBusy = true;
+    titleRefreshAt = now();
+    try {
+      const chatId = currentChatId();
+      const ids = Array.from(new Set([chatId, ...liveItems().map(item => item.chatId)].filter(Boolean)));
+      const titles = await readIndexedChatTitles(ids);
+      for (const id of ids) {
+        const title = titles.get(id) || storedChatTitle(id);
+        if (title) chatTitleCache.set(id, title);
+      }
+      let changed = false;
+      for (const record of store.items) {
+        const title = chatTitleCache.get(record.chatId);
+        if (title && !cleanChatTitle(record.chatTitle)) {
+          record.chatTitle = title;
+          changed = true;
+        }
+      }
+      if (changed) persist();
+    } finally { titleRefreshBusy = false; }
+  }
+
+  function scheduleTitleRefresh(force) {
+    clearTimeout(titleRefreshTimer);
+    titleRefreshTimer = setTimeout(() => {
+      refreshChatTitles(Boolean(force)).catch(() => {});
+    }, 350);
+  }
+
+  /* ------------------------------------------------------------------
+   * Optional GitHub sync. Credentials stay in this browser's storage.
+   * Only the highlighter document is uploaded, never TypingMind's chats.
+   * ---------------------------------------------------------------- */
+
+  let syncConfig = loadSyncConfig();
+  let cloudTimer = 0;
+  let cloudPromise = null;
+  let cloudAgain = false;
+  let cloudGeneration = 0;
+  let cloudController = null;
+  let cloudPaused = false;
+  let cloudRetryAt = 0;
+  let cloudFailures = 0;
+  let cloudLabel = syncConfig ? "Sync pending" : "";
+  let cloudDetail = syncConfig ? "Waiting to sync." : "Sync is off.";
+
+  function loadSyncConfig() {
+    try {
+      const value = JSON.parse(localStorage.getItem(LS_SYNC) || "null");
+      return value && /^[\w.-]+\/[\w.-]+$/.test(value.repo) &&
+        typeof value.token === "string" && value.token.trim() ? value : null;
+    } catch { return null; }
+  }
+
+  let publicRepoWarned = false;
+
+  function notePublicRepo() {
+    if (publicRepoWarned) return;
+    publicRepoWarned = true;
+    console.warn(
+      `[TM Highlighter] Sync repository is public. Anyone can read ${SYNC_FILE}.`
+    );
+    toast("That repo is public. Anyone can read your highlights.");
+  }
+
+  function syncStatus(label, detail) {
+    cloudLabel = label;
+    cloudDetail = detail || label;
+    renderStatus();
+    if (settingsNode) {
+      const node = settingsNode.querySelector("[data-tmhl-sync-status]");
+      if (node) node.textContent = cloudDetail;
+    }
+  }
+
+  function scheduleCloudSync(delay) {
+    if (!syncConfig || cloudPaused) return;
+    if (cloudPromise) { cloudAgain = true; return; }
+    clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(() => syncCloud(false), Math.max(delay || 0, cloudRetryAt - now()));
+  }
+
+  function cloudError(message, status) {
+    const error = new Error(message);
+    error.status = status || 0;
+    return error;
+  }
+
+  async function githubRequest(config, path, options) {
+    const controller = new AbortController();
+    cloudController = controller;
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(`https://api.github.com${path}`, {
+        method: options && options.method || "GET",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${config.token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+          ...(options && options.body ? { "Content-Type": "application/json" } : {})
+        },
+        ...(options && options.body ? { body: JSON.stringify(options.body) } : {}),
+        cache: "no-store", credentials: "omit", redirect: "error",
+        referrerPolicy: "no-referrer", signal: controller.signal
+      });
+      if (!response.ok) {
+        const code = response.status;
+        let message = `GitHub returned ${code}.`;
+        if (code === 401) message = "GitHub token is invalid or expired. Replace it in sync settings.";
+        if (code === 403) message = "GitHub refused access. Check Contents: Read and write permission and repository rules.";
+        if (code === 404) message = "Repository or file not found. Check the repository name and token access.";
+        if (code === 409 || code === 422) message = "Sync conflict or branch rule. Retrying with the latest file.";
+        const error = cloudError(message, code);
+        if (code === 429 || (code === 403 && (response.headers.get("X-RateLimit-Remaining") === "0" || response.headers.get("Retry-After")))) {
+          const retry = Number(response.headers.get("Retry-After")) * 1000;
+          const reset = Number(response.headers.get("X-RateLimit-Reset")) * 1000;
+          error.retryAt = Math.max(now() + 60000, now() + retry, reset);
+          error.message = "GitHub rate limit reached. Sync will retry automatically.";
+        }
+        throw error;
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timeout);
+      if (cloudController === controller) cloudController = null;
+    }
+  }
+
+  function base64Encode(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 8192) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    }
+    return btoa(binary);
+  }
+
+  function base64Decode(value) {
+    const binary = atob(value.replace(/\s/g, ""));
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Uint8Array.from(binary, character => character.charCodeAt(0))
+    );
+  }
+
+  function cloudDocument(doc) {
+    return {
+      application: "typingmind-highlighter", syncVersion: 1, version: 3,
+      updatedAt: doc.updatedAt,
+      items: doc.items.map(normalizeRecord).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    };
+  }
+
+  function sameCloudItems(first, second) {
+    return JSON.stringify(cloudDocument(first).items) === JSON.stringify(cloudDocument(second).items);
+  }
+
+  function parseCloudDocument(text) {
+    let value;
+    try { value = JSON.parse(text); } catch {
+      throw cloudError("The sync file is not valid JSON. It was left untouched.", 400);
+    }
+    if (!value || value.application !== "typingmind-highlighter" || value.syncVersion !== 1 ||
+      value.version !== 3 || !Array.isArray(value.items) || !value.items.every(validRecord) ||
+      new Set(value.items.map(item => item.id)).size !== value.items.length) {
+      throw cloudError("The sync file has an unsupported format. It was left untouched.", 400);
+    }
+    return { version: 3, updatedAt: Number(value.updatedAt) || 0, items: value.items.map(normalizeRecord) };
+  }
+
+  async function runCloudSync(config, generation) {
+    const check = () => {
+      if (generation !== cloudGeneration || !syncConfig) throw cloudError("Sync stopped.", 499);
+    };
+    const base = `/repos/${config.repo.split("/").map(encodeURIComponent).join("/")}`;
+    const repo = await githubRequest(config, base);
+    check();
+    if (repo.archived) throw cloudError("This repository is archived. Choose an active repository.", 400);
+    // Public repositories are allowed. A private one is still the safer choice.
+    if (repo.private !== true) notePublicRepo();
+    const branch = repo.default_branch;
+    if (!branch) throw cloudError("Initialize the repository with a README first, then sync again.", 400);
+    const path = `${base}/contents/${SYNC_FILE}`;
+    const readPath = `${path}?ref=${encodeURIComponent(branch)}`;
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      let remote = emptyStore();
+      let sha = "";
+      try {
+        const file = await githubRequest(config, readPath);
+        check();
+        if (file.type !== "file" || !file.sha) throw cloudError("The sync path is not a regular file.", 400);
+        sha = file.sha;
+        let content = file;
+        if (file.encoding !== "base64") {
+          content = await githubRequest(config, `${base}/git/blobs/${encodeURIComponent(sha)}`);
+          check();
+        }
+        if (content.encoding !== "base64" || typeof content.content !== "string") {
+          throw cloudError("GitHub did not return the complete sync file. It was left untouched.", 400);
+        }
+        remote = parseCloudDocument(base64Decode(content.content));
+      } catch (error) {
+        if (error.status !== 404 || sha) throw error;
+        // A missing file can be created only after the repository and branch exist.
+        await githubRequest(config, `${base}/branches/${encodeURIComponent(branch)}`);
+        check();
+      }
+      check();
+      store = mergeDocs(store, loadStore()).doc;
+      const merged = mergeDocs(store, remote);
+      if (merged.changed) {
+        store = merged.doc;
+        if (!persist({ skipCloud: true })) throw cloudError("Local storage is full. Sync paused; export a backup.", 400);
+        scheduleRestore(60);
+        scheduleTitleRefresh(true);
+      }
+      const snapshot = structuredCopy(store);
+      if (sha && sameCloudItems(snapshot, remote)) return;
+      const body = {
+        message: "Sync TypingMind highlights", branch,
+        content: base64Encode(JSON.stringify(cloudDocument(snapshot))),
+        ...(sha ? { sha } : {})
+      };
+      check();
+      try {
+        await githubRequest(config, path, { method: "PUT", body });
+        check();
+        // Edits made during the request are already local and need another pass.
+        if (!sameCloudItems(store, snapshot)) cloudAgain = true;
+        return;
+      } catch (error) {
+        if ((error.status === 409 || error.status === 422) && attempt < 3) continue;
+        throw error;
+      }
+    }
+  }
+
+  function syncCloud(manual) {
+    if (!syncConfig) return Promise.resolve(false);
+    if (cloudPromise) { cloudAgain = true; return cloudPromise; }
+    if (navigator.onLine === false) {
+      syncStatus("Offline", "Saved on this device. Sync resumes when you are online.");
+      return Promise.resolve(false);
+    }
+    if ((!manual && (document.hidden || cloudPaused)) || cloudRetryAt > now()) return Promise.resolve(false);
+    clearTimeout(cloudTimer);
+    cloudPaused = false;
+    const config = { ...syncConfig };
+    const generation = cloudGeneration;
+    syncStatus("Syncing...", "Syncing highlights with GitHub...");
+    cloudPromise = (async () => {
+      try {
+        const run = () => runCloudSync(config, generation);
+        if (navigator.locks && typeof navigator.locks.request === "function") {
+          await navigator.locks.request(`tmhl-github:${config.repo.toLowerCase()}`, run);
+        } else await run();
+        if (generation !== cloudGeneration) return false;
+        cloudFailures = 0;
+        cloudRetryAt = 0;
+        syncStatus("Synced", `Synced at ${new Date().toLocaleTimeString()}. Changes sync while TypingMind is open.`);
+        if (manual) toast("Highlights synced.");
+        return true;
+      } catch (error) {
+        if (generation !== cloudGeneration) return false;
+        cloudFailures += 1;
+        cloudPaused = [400, 401, 403, 404].includes(error.status) && !error.retryAt;
+        cloudRetryAt = error.retryAt || (now() + Math.min(300000, 10000 * 2 ** Math.min(cloudFailures - 1, 5)));
+        const detail = error.name === "AbortError" ? "Sync timed out. Your local highlights are saved; retrying automatically." :
+          error.status ? error.message : "Could not reach GitHub. Your local highlights are saved; retrying automatically.";
+        syncStatus("Sync issue", detail);
+        if (manual) toast(detail);
+        return false;
+      } finally {
+        cloudPromise = null;
+        if (generation === cloudGeneration && syncConfig && !cloudPaused) {
+          const again = cloudAgain;
+          cloudAgain = false;
+          scheduleCloudSync(again ? 1800 : 60000);
+        } else if (syncConfig && generation !== cloudGeneration) scheduleCloudSync(0);
+      }
+    })();
+    return cloudPromise;
+  }
+
+  function connectCloud(repoInput, tokenInput) {
+    const repo = repoInput.trim().replace(/^https:\/\/github\.com\//i, "").replace(/\/$/, "").replace(/\.git$/, "");
+    const token = tokenInput.trim();
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !token || /\s/.test(token)) {
+      toast("Enter owner/repository and a valid GitHub token.");
+      return false;
+    }
+    const next = { repo, token };
+    try { localStorage.setItem(LS_SYNC, JSON.stringify(next)); }
+    catch { toast("Could not save sync settings on this device."); return false; }
+    cloudGeneration += 1;
+    if (cloudController) cloudController.abort();
+    syncConfig = next;
+    cloudPaused = false;
+    cloudRetryAt = 0;
+    cloudFailures = 0;
+    publicRepoWarned = false;
+    renderSettings();
+    syncCloud(true);
+    return true;
+  }
+
+  function disconnectCloud() {
+    try { localStorage.removeItem(LS_SYNC); }
+    catch { toast("Could not remove sync settings. Try again."); return; }
+    cloudGeneration += 1;
+    if (cloudController) cloudController.abort();
+    clearTimeout(cloudTimer);
+    syncConfig = null;
+    cloudPaused = false;
+    cloudAgain = false;
+    publicRepoWarned = false;
+    syncStatus("", "Sync is off. Your highlights remain saved.");
+    renderSettings();
+  }
+
+  function appendSyncSettings() {
+    const field = el("div", { class: "tmhl-field" });
+    field.appendChild(el("div", { class: "tmhl-label", text: "Sync across devices" }));
+    const repo = el("input", {
+      class: "tmhl-search", type: "text", placeholder: "GitHub owner/repository",
+      "aria-label": "GitHub repository", autocomplete: "off", autocapitalize: "none", spellcheck: "false"
+    });
+    repo.value = syncConfig ? syncConfig.repo : "";
+    const token = el("input", {
+      class: "tmhl-search", type: "password", placeholder: syncConfig ? "Token saved; enter a replacement to change it" : "GitHub personal access token",
+      "aria-label": "GitHub token", autocomplete: "new-password", autocapitalize: "none", spellcheck: "false",
+      style: "margin-top:7px"
+    });
+    // Never insert the saved token into the DOM or include it in backups.
+    field.append(repo, token);
+    field.appendChild(el("div", { class: "tmhl-help", text:
+      "Public or private repositories both work. The repo needs a README so it has a default branch. Give the token access to that repo with Contents: Read and write, then enter the same repo on every device."
+    }));
+    field.appendChild(el("div", { class: "tmhl-help", text:
+      "A public repo means anyone can read typingmind-highlights.json, so keep private notes in a private repo. Your token is saved in this browser and can be read by scripts running on this TypingMind page. Never put it in your published JS."
+    }));
+    const row = el("div", { class: "tmhl-filters", style: "margin-top:8px" });
+    const connect = el("button", { type: "button", class: "tmhl-btn", text: syncConfig ? "Save and sync" : "Connect and sync" });
+    connect.addEventListener("click", () => {
+      const savedToken = syncConfig && repo.value.trim().replace(/^https:\/\/github\.com\//i, "").replace(/\/$/, "").replace(/\.git$/, "") === syncConfig.repo ? syncConfig.token : "";
+      connectCloud(repo.value, token.value || savedToken);
+      token.value = "";
+    });
+    row.appendChild(connect);
+    if (syncConfig) {
+      const sync = el("button", { type: "button", class: "tmhl-btn", text: "Sync now" });
+      sync.addEventListener("click", () => syncCloud(true));
+      const disconnect = el("button", { type: "button", class: "tmhl-btn", text: "Disconnect" });
+      disconnect.addEventListener("click", disconnectCloud);
+      row.append(sync, disconnect);
+    }
+    field.appendChild(row);
+    field.appendChild(el("div", { class: "tmhl-help", "data-tmhl-sync-status": "true", text: cloudDetail }));
+    field.appendChild(el("div", { class: "tmhl-help", text:
+      "Highlights, notes, and deletions sync automatically while the app is open. Your chats must also exist on the other device with the same chat IDs. Use TypingMind's own chat sync for the conversations."
+    }));
+    settingsNode.appendChild(field);
+  }
+
+  function startCloudSync() {
+    window.addEventListener("online", () => scheduleCloudSync(300));
+    window.addEventListener("focus", () => { scheduleCloudSync(300); scheduleTitleRefresh(true); });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) { scheduleCloudSync(300); scheduleTitleRefresh(true); }
+    });
+    scheduleCloudSync(1200);
+  }
+
+  /* ------------------------------------------------------------------
+   * Text mapping
+   * ---------------------------------------------------------------- */
+
+  let textCacheGen = 0;
+  const textCache = new WeakMap();
+
+  function bumpTextCache() {
+    textCacheGen += 1;
+  }
+
+  function getResponseRoots() {
+    const container =
+      document.querySelector(".dynamic-chat-content-container") || document;
+
+    for (const selector of ROOT_SELECTORS) {
+      const found = Array.from(container.querySelectorAll(selector)).filter(
+        (node) =>
+          node.isConnected &&
+          !(node.parentElement && node.parentElement.closest(selector))
+      );
+
+      if (found.length) return found;
+    }
+
+    return [];
+  }
+
+  function rootFromNode(node) {
+    if (!node) return null;
+
+    const element =
+      node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+
+    if (!element) return null;
+
+    for (const selector of ROOT_SELECTORS) {
+      const found = element.closest(selector);
+      if (found) return found;
+    }
+
+    return null;
+  }
+
+  function getTextNodes(root) {
+    const cached = textCache.get(root);
+
+    if (cached && cached.gen === textCacheGen) return cached.nodes;
+
+    const nodes = [];
+
+    if (root) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const parent = node.parentElement;
+
+          if (!parent || parent.closest(SKIP_TEXT_SELECTOR)) {
+            return NodeFilter.FILTER_REJECT;
+          }
+
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      });
+
+      let node = walker.nextNode();
+      while (node) {
+        nodes.push(node);
+        node = walker.nextNode();
+      }
+    }
+
+    textCache.set(root, { gen: textCacheGen, nodes });
+    return nodes;
+  }
+
+  function rootText(root) {
+    return getTextNodes(root)
+      .map((node) => node.data)
+      .join("");
+  }
+
+  function offsetOfPoint(root, container, offset) {
+    if (!root || !container || !root.contains(container)) return null;
+
+    const probe = document.createRange();
+
+    try {
+      probe.setStart(root, 0);
+      probe.setEnd(container, offset);
+    } catch {
+      return null;
+    }
+
+    let total = 0;
+
+    for (const node of getTextNodes(root)) {
+      if (node === container) {
+        return total + clamp(offset, 0, node.data.length);
+      }
+
+      let comparison = 1;
+
+      try {
+        comparison = probe.comparePoint(node, node.data.length);
+      } catch {
+        comparison = 1;
+      }
+
+      if (comparison <= 0) {
+        total += node.data.length;
+      } else {
+        break;
+      }
+    }
+
+    return total;
+  }
+
+  function rangeToOffsets(root, range) {
+    if (
+      !root ||
+      !range ||
+      !root.contains(range.startContainer) ||
+      !root.contains(range.endContainer)
+    ) {
+      return null;
+    }
+
+    const start = offsetOfPoint(root, range.startContainer, range.startOffset);
+    const end = offsetOfPoint(root, range.endContainer, range.endOffset);
+
+    if (start === null || end === null || end <= start) return null;
+    return { start, end };
+  }
+
+  function locatePoint(root, target) {
+    const nodes = getTextNodes(root);
+    let total = 0;
+    let last = null;
+
+    for (const node of nodes) {
+      last = node;
+      const length = node.data.length;
+
+      if (target <= total + length) {
+        return {
+          node,
+          offset: clamp(target - total, 0, length)
+        };
+      }
+
+      total += length;
+    }
+
+    return last ? { node: last, offset: last.data.length } : null;
+  }
+
+  function rangeFromOffsets(root, start, end) {
+    if (!root || start < 0 || end <= start) return null;
+
+    const first = locatePoint(root, start);
+    const last = locatePoint(root, end);
+
+    if (!first || !last) return null;
+
+    try {
+      const range = document.createRange();
+      range.setStart(first.node, first.offset);
+      range.setEnd(last.node, last.offset);
+      return range;
+    } catch {
+      return null;
+    }
+  }
+
+  function rangeRect(range) {
+    if (!range) return null;
+
+    const rects = Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 || rect.height > 0
+    );
+    const rect = rects.length
+      ? rects[rects.length - 1]
+      : range.getBoundingClientRect();
+
+    if (!rect) return null;
+
+    return {
+      top: rect.top,
+      bottom: rect.bottom,
+      left: rect.left,
+      right: rect.right,
+      width: rect.width,
+      height: rect.height
+    };
+  }
+
+  function normalizeWithMap(text) {
+    let output = "";
+    const map = [];
+    let previousSpace = false;
+
+    for (let index = 0; index < text.length; index += 1) {
+      const character = text[index];
+
+      if (
+        character === " " ||
+        character === "\n" ||
+        character === "\t" ||
+        character === "\r"
+      ) {
+        if (previousSpace) continue;
+
+        output += " ";
+        map.push(index);
+        previousSpace = true;
+      } else {
+        output += character;
+        map.push(index);
+        previousSpace = false;
+      }
+    }
+
+    map.push(text.length);
+    return { out: output, map };
+  }
+
+  function findAll(haystack, needle, cap) {
+    const positions = [];
+    if (!needle) return positions;
+
+    let index = haystack.indexOf(needle);
+
+    while (index !== -1 && positions.length < (cap || 200)) {
+      positions.push(index);
+      index = haystack.indexOf(needle, index + 1);
+    }
+
+    return positions;
+  }
+
+  function candidatesFor(record, info) {
+    const exact = findAll(info.text, record.exact).map((start) => ({
+      start,
+      end: start + record.exact.length,
+      penalty: 0
+    }));
+
+    if (exact.length) return exact;
+
+    const target = normalizeWithMap(record.exact).out.trim();
+    if (target.length < 4) return [];
+
+    const source = normalizeWithMap(info.text);
+
+    return findAll(source.out, target, 40).map((normalizedStart) => ({
+      start: source.map[normalizedStart],
+      end:
+        source.map[
+          Math.min(
+            normalizedStart + target.length,
+            source.map.length - 1
+          )
+        ],
+      penalty: 900
+    }));
+  }
+
+  function resolveRecord(record, rootInfo) {
+    let best = null;
+
+    for (const info of rootInfo) {
+      for (const candidate of candidatesFor(record, info)) {
+        let score = -candidate.penalty;
+
+        if (info.hash && info.hash === record.messageHash) score += 10000;
+        if (info.index === record.messageIndex) score += 800;
+        if (candidate.start === record.start) score += 500;
+
+        if (record.prefix) {
+          const before = info.text.slice(
+            Math.max(0, candidate.start - record.prefix.length),
+            candidate.start
+          );
+          if (before.endsWith(record.prefix)) score += 2500;
+        }
+
+        if (record.suffix) {
+          const after = info.text.slice(
+            candidate.end,
+            candidate.end + record.suffix.length
+          );
+          if (after.startsWith(record.suffix)) score += 2500;
+        }
+
+        score -=
+          Math.min(Math.abs(candidate.start - record.start), 10000) / 100;
+
+        if (!best || score > best.score) {
+          best = {
+            root: info.root,
+            rootIndex: info.index,
+            start: candidate.start,
+            end: candidate.end,
+            score
+          };
+        }
+      }
+    }
+
+    if (!best) return null;
+
+    return {
+      record,
+      root: best.root,
+      start: best.start,
+      end: best.end
+    };
+  }
+
+  /* ------------------------------------------------------------------
+   * Rendering marks
+   * ---------------------------------------------------------------- */
+
+  let rendered = [];
+  let applying = false;
+  let observer = null;
+  let restoreTimer = 0;
+  let pendingJump = null;
+  let pendingJumpTries = 0;
+  let suppressCardClickUntil = 0;
+
+  function marksById(id) {
+    return Array.from(document.querySelectorAll(MARK_SELECTOR)).filter(
+      (mark) => mark.dataset.tmhlId === id
+    );
+  }
+
+  function unwrapMark(mark) {
+    const parent = mark.parentNode;
+    if (!parent) return;
+
+    try {
+      while (mark.firstChild) {
+        parent.insertBefore(mark.firstChild, mark);
+      }
+      parent.removeChild(mark);
+    } catch (error) {
+      console.warn("[TM Highlighter] Could not remove a mark.", error);
+    }
+  }
+
+  function clearMarks(predicate) {
+    const marks = Array.from(document.querySelectorAll(MARK_SELECTOR));
+    if (!marks.length) return;
+
+    withObserverPaused(() => {
+      marks.forEach((mark) => {
+        if (!predicate || predicate(mark)) unwrapMark(mark);
+      });
+    });
+
+    bumpTextCache();
+  }
+
+  function withObserverPaused(fn) {
+    applying = true;
+    if (observer) observer.disconnect();
+
+    try {
+      fn();
+    } finally {
+      applying = false;
+
+      if (observer) {
+        window.setTimeout(() => {
+          observer.takeRecords();
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            characterData: true
+          });
+        }, 0);
+      }
+    }
+  }
+
+  function segmentAttr(index, count) {
+    if (count <= 1) return "solo";
+    if (index === 0) return "first";
+    if (index === count - 1) return "last";
+    return "mid";
+  }
+
+  function wrapRange(root, start, end, record) {
+    const nodes = getTextNodes(root);
+    const segments = [];
+    let total = 0;
+
+    for (const node of nodes) {
+      const nodeStart = total;
+      const nodeEnd = total + node.data.length;
+      const localStart = Math.max(0, start - nodeStart);
+      const localEnd = Math.min(node.data.length, end - nodeStart);
+
+      if (
+        localStart < localEnd &&
+        nodeEnd > start &&
+        nodeStart < end
+      ) {
+        if (node.parentElement && node.parentElement.closest(MARK_SELECTOR)) {
+          return false;
+        }
+
+        segments.push({ node, start: localStart, end: localEnd });
+      }
+
+      total = nodeEnd;
+    }
+
+    if (!segments.length) return false;
+
+    withObserverPaused(() => {
+      for (let index = segments.length - 1; index >= 0; index -= 1) {
+        const segment = segments[index];
+        let target = segment.node;
+
+        if (segment.end < target.data.length) target.splitText(segment.end);
+        if (segment.start > 0) target = target.splitText(segment.start);
+
+        const mark = document.createElement("mark");
+        mark.className = "tmhl-mark";
+        mark.dataset.tmhlId = record.id;
+        mark.dataset.tmhlChat = record.chatId;
+        mark.dataset.color = record.color;
+        mark.dataset.seg = segmentAttr(index, segments.length);
+
+        if (record.note) mark.dataset.note = "1";
+        mark.title = record.note || "";
+
+        target.parentNode.insertBefore(mark, target);
+        mark.appendChild(target);
+      }
+    });
+
+    bumpTextCache();
+    return true;
+  }
+
+  function restoreHighlights() {
+    if (applying) return;
+
+    const chatId = currentChatId();
+    bumpTextCache();
+    rendered = [];
+
+    if (!chatId) {
+      clearMarks();
+      return;
+    }
+
+    const records = itemsForChat(chatId);
+
+    if (!records.length) {
+      clearMarks();
+      updateLauncher();
+      return;
+    }
+
+    const roots = getResponseRoots();
+    if (!roots.length) return;
+
+    const rootInfo = roots.map((root, index) => {
+      const text = rootText(root);
+      return { root, index, text, hash: hashText(text) };
+    });
+
+    const locations = records
+      .map((record) => resolveRecord(record, rootInfo))
+      .filter(Boolean);
+
+    rendered = locations;
+
+    const wanted = new Set(locations.map((item) => item.record.id));
+
+    clearMarks(
+      (mark) =>
+        mark.dataset.tmhlChat !== chatId ||
+        !wanted.has(mark.dataset.tmhlId)
+    );
+
+    for (const location of locations) {
+      const existing = marksById(location.record.id);
+
+      if (existing.length) {
+        existing.forEach((mark, index) => {
+          mark.dataset.color = location.record.color;
+          mark.dataset.seg = segmentAttr(index, existing.length);
+
+          if (location.record.note) {
+            mark.dataset.note = "1";
+          } else {
+            delete mark.dataset.note;
+          }
+
+          mark.title = location.record.note || "";
+        });
+        continue;
+      }
+
+      wrapRange(
+        location.root,
+        location.start,
+        location.end,
+        location.record
+      );
+    }
+
+    updateLauncher();
+    tryPendingJump();
+  }
+
+  function scheduleRestore(delay) {
+    window.clearTimeout(restoreTimer);
+    restoreTimer = window.setTimeout(restoreHighlights, delay || 180);
+  }
+
+  function flashMark(id) {
+    const marks = marksById(id);
+    if (!marks.length) return false;
+
+    marks.forEach((mark) => {
+      mark.classList.remove("tmhl-flash");
+      void mark.offsetWidth;
+      mark.classList.add("tmhl-flash");
+
+      window.setTimeout(() => mark.classList.remove("tmhl-flash"), 1600);
+    });
+
+    marks[0].scrollIntoView({ behavior: "smooth", block: "center" });
+    return true;
+  }
+
+  function tryPendingJump() {
+    if (!pendingJump) return;
+
+    if (flashMark(pendingJump)) {
+      pendingJump = null;
+      pendingJumpTries = 0;
+      return;
+    }
+
+    pendingJumpTries += 1;
+
+    if (pendingJumpTries > 12) {
+      pendingJump = null;
+      pendingJumpTries = 0;
+      toast("Could not find that highlight in the page.");
+      return;
+    }
+
+    window.setTimeout(() => scheduleRestore(60), 450);
+  }
+
+  function jumpTo(record) {
+    if (!record || record.deleted || !record.chatId) return;
+
+    if (record.chatId !== currentChatId()) {
+      pendingJump = record.id;
+      pendingJumpTries = 0;
+      window.location.hash = `#chat=${encodeURIComponent(record.chatId)}`;
+      scheduleRestore(500);
+
+      if (isNarrow()) closePanel();
+      return;
+    }
+
+    if (!flashMark(record.id)) {
+      pendingJump = record.id;
+      pendingJumpTries = 0;
+      scheduleRestore(60);
+    }
+
+    if (isNarrow()) closePanel();
+  }
+
+  /* ------------------------------------------------------------------
+   * Message observer
+   * ---------------------------------------------------------------- */
+
+  function startObserver() {
+    observer = new MutationObserver((records) => {
+      if (applying) return;
+
+      const relevant = records.some((record) => {
+        const target = record.target;
+        const node =
+          target && target.nodeType === Node.ELEMENT_NODE
+            ? target
+            : target && target.parentElement;
+
+        return !(node && node.closest("[data-tmhl-ui]"));
+      });
+
+      if (!relevant) return;
+
+      bumpTextCache();
+      scheduleTitleRefresh(false);
+
+      const chatId = currentChatId();
+      if (!currentChatHasHighlights(chatId)) return;
+
+      scheduleRestore(260);
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+  }
+
+  /* ------------------------------------------------------------------
+   * Theme
+   * ---------------------------------------------------------------- */
+
+  function applyTheme() {
+    const dark =
+      document.documentElement.classList.contains("dark") ||
+      document.body.classList.contains("dark") ||
+      window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+    document.documentElement.setAttribute(
+      "data-tmhl-theme",
+      dark ? "dark" : "light"
+    );
+  }
+
+  /* ------------------------------------------------------------------
+   * Styles
+   * ---------------------------------------------------------------- */
+
+  function injectStyles() {
+    const existing = document.getElementById("tmhl-styles");
+    if (existing) existing.remove();
+
+    const style = document.createElement("style");
+    style.id = "tmhl-styles";
+    style.textContent = `
+:root[data-tmhl-theme="light"] {
+  --tmhl-yellow: rgba(250, 204, 21, .40);
+  --tmhl-yellow-2: rgba(202, 138, 4, .55);
+  --tmhl-green: rgba(34, 197, 94, .30);
+  --tmhl-green-2: rgba(21, 128, 61, .50);
+  --tmhl-blue: rgba(59, 130, 246, .28);
+  --tmhl-blue-2: rgba(29, 78, 216, .48);
+  --tmhl-pink: rgba(236, 72, 153, .26);
+  --tmhl-pink-2: rgba(190, 24, 93, .48);
+  --tmhl-purple: rgba(168, 85, 247, .26);
+  --tmhl-purple-2: rgba(126, 34, 206, .48);
+  --tmhl-surface: rgba(255, 255, 255, .94);
+  --tmhl-surface-solid: #ffffff;
+  --tmhl-raised: rgba(0, 0, 0, .035);
+  --tmhl-raised-2: rgba(0, 0, 0, .07);
+  --tmhl-border: rgba(9, 9, 11, .12);
+  --tmhl-border-soft: rgba(9, 9, 11, .07);
+  --tmhl-text: #18181b;
+  --tmhl-muted: #71717a;
+  --tmhl-glint: rgba(255, 255, 255, .88);
+  --tmhl-shadow: 0 24px 60px rgba(9, 9, 11, .16), 0 2px 8px rgba(9, 9, 11, .07);
+  --tmhl-toolbar-shadow: 0 14px 34px rgba(24, 24, 27, .14), 0 3px 9px rgba(24, 24, 27, .08);
+  --tmhl-menu-shadow: 0 20px 44px rgba(24, 24, 27, .18), 0 3px 10px rgba(24, 24, 27, .08);
+}
+
+:root[data-tmhl-theme="dark"] {
+  --tmhl-yellow: rgba(250, 204, 21, .26);
+  --tmhl-yellow-2: rgba(250, 204, 21, .48);
+  --tmhl-green: rgba(74, 222, 128, .22);
+  --tmhl-green-2: rgba(74, 222, 128, .42);
+  --tmhl-blue: rgba(96, 165, 250, .26);
+  --tmhl-blue-2: rgba(96, 165, 250, .46);
+  --tmhl-pink: rgba(244, 114, 182, .24);
+  --tmhl-pink-2: rgba(244, 114, 182, .44);
+  --tmhl-purple: rgba(192, 132, 252, .24);
+  --tmhl-purple-2: rgba(192, 132, 252, .44);
+  --tmhl-surface: rgba(24, 24, 27, .94);
+  --tmhl-surface-solid: #18181b;
+  --tmhl-raised: rgba(255, 255, 255, .05);
+  --tmhl-raised-2: rgba(255, 255, 255, .1);
+  --tmhl-border: rgba(255, 255, 255, .13);
+  --tmhl-border-soft: rgba(255, 255, 255, .08);
+  --tmhl-text: #f4f4f5;
+  --tmhl-muted: #a1a1aa;
+  --tmhl-glint: rgba(255, 255, 255, .075);
+  --tmhl-shadow: 0 24px 60px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .35);
+  --tmhl-toolbar-shadow: 0 16px 38px rgba(0, 0, 0, .52), 0 3px 10px rgba(0, 0, 0, .34);
+  --tmhl-menu-shadow: 0 22px 52px rgba(0, 0, 0, .62), 0 3px 12px rgba(0, 0, 0, .4);
+}
+
+/* Highlighted text */
+mark.tmhl-mark {
+  --c: var(--tmhl-yellow);
+  --c2: var(--tmhl-yellow-2);
+  background-color: var(--c) !important;
+  color: inherit !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: .18em;
+  box-shadow: 0 0 0 .1em var(--c);
+  line-height: inherit !important;
+  cursor: pointer;
+  transition: background-color .14s ease, box-shadow .14s ease;
+  -webkit-box-decoration-break: slice;
+  box-decoration-break: slice;
+}
+
+mark.tmhl-mark[data-color="green"] { --c: var(--tmhl-green); --c2: var(--tmhl-green-2); }
+mark.tmhl-mark[data-color="blue"] { --c: var(--tmhl-blue); --c2: var(--tmhl-blue-2); }
+mark.tmhl-mark[data-color="pink"] { --c: var(--tmhl-pink); --c2: var(--tmhl-pink-2); }
+mark.tmhl-mark[data-color="purple"] { --c: var(--tmhl-purple); --c2: var(--tmhl-purple-2); }
+mark.tmhl-mark[data-seg="first"] { border-radius: .18em 0 0 .18em; }
+mark.tmhl-mark[data-seg="mid"] { border-radius: 0; }
+mark.tmhl-mark[data-seg="last"] { border-radius: 0 .18em .18em 0; }
+mark.tmhl-mark[data-note="1"] { box-shadow: 0 0 0 .1em var(--c); }
+mark.tmhl-mark:hover { background-color: var(--c2) !important; }
+mark.tmhl-mark.tmhl-flash { animation: tmhl-flash 1.5s ease; }
+
+@keyframes tmhl-flash {
+  0%, 100% { box-shadow: 0 0 0 .1em var(--c); }
+  15%, 55% { box-shadow: 0 0 0 .22em var(--c2); }
+}
+
+/* Shared UI */
+#tmhl-toolbar,
+#tmhl-panel,
+#tmhl-launcher,
+#tmhl-toast {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--tmhl-text);
+  box-sizing: border-box;
+}
+
+#tmhl-panel *, #tmhl-toolbar * { box-sizing: border-box; }
+#tmhl-panel button,
+#tmhl-panel input,
+#tmhl-panel textarea,
+#tmhl-toolbar button { font-family: inherit; }
+
+/* Vertical selection bar */
+#tmhl-toolbar {
+  position: fixed;
+  z-index: 2147483646;
+  width: 36px;
+  max-height: calc(100vh - 16px);
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  padding: 3px;
+  border: 1px solid var(--tmhl-border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--tmhl-glint), transparent 60%), var(--tmhl-surface);
+  backdrop-filter: blur(20px) saturate(165%);
+  -webkit-backdrop-filter: blur(20px) saturate(165%);
+  box-shadow: var(--tmhl-toolbar-shadow);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  isolation: isolate;
+  overflow: visible;
+  animation: tmhl-enter .16s ease-out;
+}
+
+#tmhl-toolbar[hidden] { display: none !important; }
+#tmhl-toolbar .tmhl-swatch,
+#tmhl-toolbar .tmhl-toolbar-more,
+#tmhl-toolbar .tmhl-tool { touch-action: manipulation; }
+
+@keyframes tmhl-enter {
+  from { opacity: 0; filter: blur(2px); }
+  to { opacity: 1; filter: none; }
+}
+
+.tmhl-toolbar-sep {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 1px;
+  margin: 3px 0;
+  background: var(--tmhl-border-soft);
+}
+
+.tmhl-color-rail {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: 100%;
+}
+
+.tmhl-toolbar-grip,
+.tmhl-toolbar-more {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 26px;
+  min-width: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tmhl-muted);
+  cursor: pointer;
+  transition: color .14s ease, background-color .14s ease;
+}
+
+.tmhl-toolbar-grip { cursor: grab; touch-action: none; }
+.tmhl-toolbar-grip:hover,
+.tmhl-toolbar-more:hover { color: var(--tmhl-text); background: var(--tmhl-raised-2); }
+.tmhl-toolbar-grip:active { cursor: grabbing; }
+.tmhl-toolbar-grip svg { width: 15px; height: 9px; }
+.tmhl-toolbar-more svg { width: 15px; height: 15px; }
+.tmhl-toolbar-more[aria-expanded="true"] { color: var(--tmhl-text); background: var(--tmhl-raised-2); }
+
+#tmhl-toolbar.tmhl-dragging {
+  cursor: grabbing;
+  animation: none;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, .24), 0 4px 12px rgba(0, 0, 0, .16);
+}
+
+.tmhl-swatch {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tmhl-swatch::before {
+  content: "";
+  width: 17px;
+  height: 17px;
+  border-radius: 6px;
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px var(--tmhl-border), 0 0 0 2px transparent;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+
+.tmhl-swatch:hover::before { transform: translateY(-1px); }
+.tmhl-swatch[aria-pressed="true"]::before {
+  box-shadow: inset 0 0 0 1px var(--tmhl-border), 0 0 0 2px var(--tmhl-text);
+}
+
+.tmhl-color-rail > .tmhl-swatch {
+  width: 30px;
+  height: 25px;
+  min-width: 30px;
+  border-radius: 7px;
+  background: transparent !important;
+}
+
+.tmhl-color-rail > .tmhl-swatch::before {
+  width: 19px;
+  height: 9px;
+  border-radius: 999px;
+  transform: none;
+  box-shadow: inset 0 0 0 1px var(--tmhl-border);
+  transition: transform .14s ease, box-shadow .14s ease;
+}
+
+.tmhl-color-rail > .tmhl-swatch:hover { background: transparent !important; }
+.tmhl-color-rail > .tmhl-swatch:hover::before { transform: scaleX(1.1); }
+.tmhl-color-rail > .tmhl-swatch[aria-pressed="true"] { background: transparent !important; }
+.tmhl-color-rail > .tmhl-swatch[aria-pressed="true"]::before {
+  transform: none;
+  box-shadow: inset 0 0 0 1px var(--tmhl-border), 0 0 0 2px var(--tmhl-surface-solid), 0 0 0 3px var(--tmhl-text);
+}
+
+.tmhl-tool {
+  height: 30px;
+  min-width: 30px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tmhl-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1;
+}
+
+.tmhl-tool:hover { background: var(--tmhl-raised-2); }
+.tmhl-tool.tmhl-danger { color: #f87171; }
+.tmhl-tool svg { width: 15px; height: 15px; }
+
+.tmhl-toolbar-menu {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 8px);
+  right: auto;
+  width: max-content;
+  min-width: 178px;
+  max-width: min(220px, calc(100vw - 16px));
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--tmhl-border);
+  border-radius: 15px;
+  background: linear-gradient(180deg, var(--tmhl-glint), transparent 42%), var(--tmhl-surface);
+  box-shadow: var(--tmhl-menu-shadow);
+  backdrop-filter: blur(22px) saturate(165%);
+  -webkit-backdrop-filter: blur(22px) saturate(165%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-5px) scale(.975);
+  transform-origin: top left;
+  transition: opacity .14s ease, transform .14s cubic-bezier(.2, .8, .25, 1), visibility 0s linear .15s;
+}
+
+.tmhl-toolbar-menu.tmhl-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: none;
+  transition-delay: 0s;
+}
+
+.tmhl-toolbar-menu.tmhl-menu-left {
+  left: auto;
+  right: calc(100% + 8px);
+  transform-origin: top right;
+}
+
+.tmhl-toolbar-menu > .tmhl-tool {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  display: flex;
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 0 10px;
+  border-radius: 9px;
+  color: var(--tmhl-text);
+  font-size: 12.5px;
+  font-weight: 590;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.tmhl-toolbar-menu > .tmhl-tool:hover { background: var(--tmhl-raised-2); }
+.tmhl-toolbar-menu > .tmhl-tool svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: var(--tmhl-muted);
+}
+.tmhl-toolbar-menu > .tmhl-tool::after {
+  content: attr(data-tmhl-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tmhl-toolbar-menu > .tmhl-tool.tmhl-danger,
+.tmhl-toolbar-menu > .tmhl-tool.tmhl-danger svg { color: #f87171; }
+
+/* Focus */
+.tmhl-toolbar-grip:focus-visible,
+.tmhl-toolbar-more:focus-visible,
+.tmhl-swatch:focus-visible,
+.tmhl-tool:focus-visible,
+.tmhl-act:focus-visible,
+.tmhl-btn:focus-visible,
+.tmhl-chip:focus-visible,
+.tmhl-switch:focus-visible,
+.tmhl-search:focus-visible,
+.tmhl-noteedit:focus-visible {
+  outline: 2px solid var(--tmhl-text);
+  outline-offset: 2px;
+}
+
+/* Launcher */
+#tmhl-launcher {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 2147483640;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 11px 0 9px;
+  border: 1px solid var(--tmhl-border);
+  border-radius: 999px;
+  background: var(--tmhl-surface);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--tmhl-shadow);
+  color: var(--tmhl-text);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: grab;
+  opacity: .5;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  visibility: visible;
+  transform: none;
+  transition: opacity .2s ease, transform .2s ease, box-shadow .18s ease, visibility 0s linear 0s;
+}
+
+#tmhl-launcher:hover { opacity: .88; transform: none; }
+#tmhl-launcher[hidden] { display: none !important; }
+#tmhl-launcher .tmhl-ico {
+  display: inline-flex;
+  flex: 0 0 15px;
+  color: var(--tmhl-yellow-2);
+}
+#tmhl-launcher .tmhl-ico svg { width: 15px; height: 15px; display: block; }
+#tmhl-launcher .tmhl-label-count { font-variant-numeric: tabular-nums; }
+#tmhl-launcher.tmhl-dragging {
+  cursor: grabbing;
+  opacity: 1;
+  transform: none;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .34);
+  transition: none;
+}
+#tmhl-launcher.tmhl-bump { animation: tmhl-bump .4s ease; }
+#tmhl-launcher.tmhl-panel-open,
+#tmhl-launcher.tmhl-native-sidebar-open {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  transform: translateY(-6px) scale(.9) !important;
+  transition: opacity .25s ease, transform .25s ease, visibility 0s linear .25s;
+}
+
+@keyframes tmhl-bump {
+  0% { transform: none; }
+  40% { opacity: 1; }
+  100% { transform: none; }
+}
+
+/* Panel */
+#tmhl-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483643;
+  background: rgba(0, 0, 0, .38);
+  backdrop-filter: blur(2px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .22s ease;
+}
+
+#tmhl-scrim.tmhl-open { opacity: 1; pointer-events: auto; }
+
+#tmhl-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(420px, 100vw);
+  z-index: 2147483644;
+  display: flex;
+  flex-direction: column;
+  background: var(--tmhl-surface-solid);
+  border-left: 1px solid var(--tmhl-border);
+  box-shadow: var(--tmhl-shadow);
+  transform: translateX(102%);
+  transition: transform .26s cubic-bezier(.32, .72, 0, 1);
+  -webkit-tap-highlight-color: transparent;
+}
+
+#tmhl-panel.tmhl-open { transform: none; }
+#tmhl-panel button,
+#tmhl-panel input { touch-action: manipulation; }
+
+/* Sheet grab handle. Visible on narrow screens only. */
+.tmhl-grab { display: none; }
+
+.tmhl-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 10px 10px 14px;
+  border-bottom: 1px solid var(--tmhl-border-soft);
+}
+
+.tmhl-title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+}
+
+.tmhl-count {
+  margin-right: auto;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--tmhl-muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--tmhl-raised-2);
+}
+
+.tmhl-head .tmhl-tool { color: var(--tmhl-muted); }
+.tmhl-head .tmhl-tool:hover { color: var(--tmhl-text); }
+.tmhl-head .tmhl-tab[aria-pressed="true"] {
+  color: var(--tmhl-text);
+  background: var(--tmhl-raised-2);
+}
+
+.tmhl-controls { flex: 0 0 auto; padding: 10px 14px 8px; display: grid; gap: 9px; }
+
+.tmhl-searchwrap { position: relative; display: block; }
+.tmhl-searchicon {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--tmhl-muted);
+  pointer-events: none;
+}
+.tmhl-searchicon svg { width: 15px; height: 15px; display: block; }
+
+.tmhl-search {
+  width: 100%;
+  height: 36px;
+  padding: 0 11px;
+  border: 1px solid var(--tmhl-border);
+  border-radius: 10px;
+  background: var(--tmhl-raised);
+  color: var(--tmhl-text);
+  font-size: 13px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.tmhl-search:focus { border-color: var(--tmhl-muted); }
+.tmhl-search::placeholder { color: var(--tmhl-muted); }
+.tmhl-searchwrap .tmhl-search { padding: 0 36px; }
+.tmhl-searchwrap .tmhl-search::-webkit-search-cancel-button { display: none; }
+
+.tmhl-clear {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tmhl-muted);
+  cursor: pointer;
+}
+.tmhl-clear svg { width: 13px; height: 13px; display: block; }
+.tmhl-clear:hover { color: var(--tmhl-text); background: var(--tmhl-raised-2); }
+.tmhl-searchwrap[data-filled="1"] .tmhl-clear { display: inline-flex; }
+
+.tmhl-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* One scrolling row so filters never stack into three lines on a phone. */
+.tmhl-filterbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 -2px;
+  padding: 1px 2px 2px;
+}
+.tmhl-filterbar::-webkit-scrollbar { display: none; }
+.tmhl-filterbar > * { flex: 0 0 auto; }
+
+.tmhl-chip {
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--tmhl-border-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tmhl-muted);
+  font-size: 11.5px;
+  font-weight: 620;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tmhl-chip:hover { background: var(--tmhl-raised); }
+.tmhl-chip[aria-pressed="true"] {
+  color: var(--tmhl-text);
+  background: var(--tmhl-raised-2);
+  border-color: var(--tmhl-border);
+}
+.tmhl-chipicon { display: inline-flex; }
+.tmhl-chipicon svg { width: 13px; height: 13px; display: block; }
+.tmhl-colorchip { padding: 0 10px; }
+.tmhl-chip i {
+  width: 14px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--sw);
+  box-shadow: inset 0 0 0 1px var(--tmhl-border-soft);
+  display: block;
+}
+
+.tmhl-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.tmhl-group {
+  position: sticky;
+  top: -2px;
+  z-index: 2;
+  margin: 6px 0 -2px;
+  padding: 7px 2px 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--tmhl-surface-solid);
+  color: var(--tmhl-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.tmhl-group svg { width: 12px; height: 12px; display: block; flex: 0 0 12px; }
+.tmhl-groupname {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tmhl-group b {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--tmhl-raised-2);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.tmhl-card {
+  position: relative;
+  padding: 12px 12px 10px 14px;
+  border: 1px solid var(--tmhl-border-soft);
+  border-radius: 12px;
+  background: var(--tmhl-raised);
+  cursor: pointer;
+  transition: background .14s ease, border-color .14s ease;
+}
+
+.tmhl-card:hover { background: var(--tmhl-raised-2); border-color: var(--tmhl-border); }
+.tmhl-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--rail);
+}
+
+/* Full text, wrapped. Long words and URLs break instead of overflowing. */
+.tmhl-quote {
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tmhl-note {
+  margin-top: 8px;
+  padding: 7px 9px;
+  display: flex;
+  gap: 7px;
+  border-left: 2px solid var(--rail);
+  border-radius: 0 8px 8px 0;
+  background: var(--tmhl-raised-2);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--tmhl-text);
+}
+.tmhl-noteicon { flex: 0 0 13px; margin-top: 2px; color: var(--tmhl-muted); }
+.tmhl-noteicon svg { width: 13px; height: 13px; display: block; }
+.tmhl-notetext { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.tmhl-meta {
+  margin-top: 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--tmhl-muted);
+}
+.tmhl-chat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+.tmhl-chat svg { width: 12px; height: 12px; display: block; flex: 0 0 12px; }
+.tmhl-chatname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmhl-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
+.tmhl-actions { margin-left: auto; flex: 0 0 auto; display: flex; gap: 2px; }
+.tmhl-act {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tmhl-muted);
+  cursor: pointer;
+}
+.tmhl-act:hover { background: var(--tmhl-raised-2); color: var(--tmhl-text); }
+.tmhl-act.tmhl-danger:hover { color: #f87171; }
+.tmhl-act svg { width: 15px; height: 15px; display: block; }
+
+.tmhl-noteedit {
+  margin-top: 8px;
+  width: 100%;
+  min-height: 68px;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid var(--tmhl-border);
+  border-radius: 9px;
+  background: var(--tmhl-surface-solid);
+  color: var(--tmhl-text);
+  font-size: 12.5px;
+  line-height: 1.45;
+  font-family: inherit;
+  outline: none;
+}
+
+.tmhl-empty {
+  margin: 34px 10px;
+  text-align: center;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--tmhl-muted);
+}
+.tmhl-empty b {
+  display: block;
+  color: var(--tmhl-text);
+  font-size: 13.5px;
+  margin-bottom: 5px;
+}
+
+.tmhl-foot {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 9px 12px calc(9px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--tmhl-border-soft);
+  background: var(--tmhl-surface-solid);
+}
+.tmhl-foot .tmhl-status {
+  grid-column: 1 / -1;
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--tmhl-muted);
+}
+.tmhl-foot .tmhl-btn {
+  width: 100%;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+}
+.tmhl-btnicon { display: inline-flex; color: var(--tmhl-muted); }
+.tmhl-btnicon svg { width: 14px; height: 14px; display: block; }
+
+.tmhl-btn {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--tmhl-border-soft);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--tmhl-text);
+  font-size: 11.5px;
+  font-weight: 620;
+  cursor: pointer;
+}
+.tmhl-btn:hover { background: var(--tmhl-raised-2); }
+.tmhl-btn.tmhl-danger { color: #f87171; }
+
+.tmhl-settings { padding: 4px 14px 18px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.tmhl-field { margin-bottom: 13px; }
+.tmhl-label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--tmhl-text);
+}
+.tmhl-help { margin-top: 5px; font-size: 11px; line-height: 1.5; color: var(--tmhl-muted); }
+.tmhl-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.tmhl-switch {
+  position: relative;
+  width: 40px;
+  height: 23px;
+  flex: 0 0 40px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--tmhl-raised-2);
+  cursor: pointer;
+  transition: background .16s ease;
+}
+.tmhl-switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--tmhl-text);
+  opacity: .55;
+  transition: transform .16s ease, opacity .16s ease;
+}
+.tmhl-switch[aria-checked="true"] { background: var(--tmhl-green-2); }
+.tmhl-switch[aria-checked="true"]::after { transform: translateX(17px); opacity: 1; }
+
+/* Toast */
+#tmhl-toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(26px, env(safe-area-inset-bottom, 0px));
+  z-index: 2147483647;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 28px);
+  padding: 9px 14px;
+  border: 1px solid var(--tmhl-border);
+  border-radius: 11px;
+  background: var(--tmhl-surface);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--tmhl-shadow);
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: center;
+  pointer-events: none;
+  animation: tmhl-enter .16s ease;
+}
+#tmhl-toast[hidden] { display: none !important; }
+
+@media (pointer: coarse) {
+  #tmhl-toolbar { width: 38px; padding: 4px; border-radius: 15px; }
+  .tmhl-color-rail > .tmhl-swatch { width: 32px; height: 27px; min-width: 32px; }
+  .tmhl-color-rail > .tmhl-swatch::before { width: 20px; height: 10px; }
+  .tmhl-toolbar-grip,
+  .tmhl-toolbar-more { width: 32px; height: 28px; min-width: 32px; }
+  .tmhl-toolbar-sep { margin: 2px 0; }
+  .tmhl-toolbar-menu { min-width: 190px; padding: 7px; }
+  .tmhl-toolbar-menu > .tmhl-tool { min-height: 42px; height: 42px; padding: 0 11px; font-size: 13px; }
+  .tmhl-swatch { width: 38px; height: 38px; border-radius: 11px; }
+  .tmhl-swatch::before { width: 20px; height: 20px; }
+  .tmhl-tool { height: 38px; min-width: 38px; border-radius: 10px; }
+  .tmhl-tool svg { width: 17px; height: 17px; }
+  .tmhl-act { width: 32px; height: 32px; border-radius: 9px; }
+  .tmhl-act svg { width: 16px; height: 16px; }
+  .tmhl-chip { height: 31px; padding: 0 12px; font-size: 12px; }
+  .tmhl-searchwrap .tmhl-search { height: 40px; }
+  .tmhl-foot .tmhl-btn { height: 36px; font-size: 12px; }
+  .tmhl-btn { height: 32px; }
+}
+
+@media (max-width: 820px) {
+  #tmhl-panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: min(86vh, 880px);
+    border-left: 0;
+    border-top: 1px solid var(--tmhl-border);
+    border-radius: 20px 20px 0 0;
+    transform: translateY(102%);
+  }
+  #tmhl-panel.tmhl-open { transform: none; }
+
+  .tmhl-grab {
+    display: block;
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 9px 0 3px;
+    cursor: grab;
+    touch-action: none;
+  }
+  .tmhl-grab::before {
+    content: "";
+    display: block;
+    width: 40px;
+    height: 4px;
+    margin: 0 auto;
+    border-radius: 999px;
+    background: var(--tmhl-border);
+  }
+
+  .tmhl-head { padding-top: 6px; }
+  .tmhl-meta .tmhl-chat { flex: 1 1 100%; max-width: 100%; }
+  .tmhl-meta .tmhl-chatname { white-space: normal; overflow-wrap: anywhere; }
+  #tmhl-launcher { height: 34px; opacity: .6; }
+  #tmhl-toast { bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+}
+
+@supports (height: 100dvh) {
+  @media (max-width: 820px) {
+    #tmhl-panel { height: min(86dvh, 880px); }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #tmhl-panel,
+  #tmhl-scrim,
+  #tmhl-toolbar,
+  #tmhl-launcher,
+  .tmhl-card,
+  .tmhl-toolbar-menu,
+  mark.tmhl-mark {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+`;
+
+
+    document.head.appendChild(style);
+  }
+
+  /* ------------------------------------------------------------------
+   * Icons
+   * ---------------------------------------------------------------- */
+
+  const ICON = {
+    marker:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3.6 20.4 8.8 11.6 17.6H6.4v-5.2Z"/><path d="M3.5 21h9"/></svg>',
+    note:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5h8.5"/><path d="M16.6 3.6a2.05 2.05 0 0 1 2.9 2.9L8.6 17.4l-4 1.1 1.1-4Z"/></svg>',
+    copy:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2.4"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>',
+    trash:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6h17"/><path d="M9 6V4.6A1.6 1.6 0 0 1 10.6 3h2.8A1.6 1.6 0 0 1 15 4.6V6"/><path d="M6.5 6l.9 13.1A1.9 1.9 0 0 0 9.3 21h5.4a1.9 1.9 0 0 0 1.9-1.9L17.5 6"/><path d="M10.2 10.5v6M13.8 10.5v6"/></svg>',
+    close:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+    list:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>',
+    gear:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.4-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1A1.7 1.7 0 0 0 10 3.1V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1H23a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>',
+    jump:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="1.9" fill="currentColor" stroke="none"/><path d="M12 2.2v2.6M12 19.2v2.6M2.2 12h2.6M19.2 12h2.6"/></svg>',
+    move:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v17M3.5 12h17"/><path d="M9.4 6.1 12 3.5l2.6 2.6M9.4 17.9 12 20.5l2.6-2.6M6.1 9.4 3.5 12l2.6 2.6M17.9 9.4 20.5 12l-2.6 2.6"/></svg>',
+    chat:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.9A8 8 0 1 1 20.5 12Z"/></svg>',
+    layers:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 8.5 4.6L12 12.2 3.5 7.6 12 3Z"/><path d="m4 12 8 4.4 8-4.4"/><path d="m4 16.4 8 4.4 8-4.4"/></svg>',
+    search:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>',
+    download:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v11"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M4 19.5h16"/></svg>',
+    archive:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4.6" rx="1.4"/><path d="M4.8 8.6v10A1.9 1.9 0 0 0 6.7 20.5h10.6a1.9 1.9 0 0 0 1.9-1.9v-10"/><path d="M10 12.5h4"/></svg>',
+    upload:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4"/><path d="m7.5 8.5 4.5-4.5 4.5 4.5"/><path d="M4 19.5h16"/></svg>',
+    grip:
+      '<svg viewBox="0 0 18 12" fill="currentColor"><circle cx="3" cy="4" r="1.15"/><circle cx="9" cy="4" r="1.15"/><circle cx="15" cy="4" r="1.15"/><circle cx="3" cy="9" r="1.15"/><circle cx="9" cy="9" r="1.15"/><circle cx="15" cy="9" r="1.15"/></svg>',
+    more:
+      '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
+    target:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>'
+  };
+
+  /* ------------------------------------------------------------------
+   * Toast
+   * ---------------------------------------------------------------- */
+
+  let toastNode = null;
+  let toastTimer = 0;
+
+  function toast(message) {
+    if (!toastNode) return;
+
+    window.clearTimeout(toastTimer);
+    toastNode.textContent = message;
+    toastNode.hidden = false;
+
+    toastTimer = window.setTimeout(() => {
+      toastNode.hidden = true;
+    }, 2000);
+  }
+
+  /* ------------------------------------------------------------------
+   * Toolbar
+   * ---------------------------------------------------------------- */
+
+  let toolbar = null;
+  let captured = null;
+  let activeId = null;
+  let toolbarMenu = null;
+  let toolbarMoreButton = null;
+  let toolbarAnchorRect = null;
+  let toolbarDragging = false;
+
+  function bindPress(node, action) {
+    let last = 0;
+
+    const run = (event) => {
+      if (
+        event.type === "pointerdown" &&
+        event.button !== undefined &&
+        event.button !== 0
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const stamp = now();
+      if (stamp - last < 220) return;
+
+      last = stamp;
+      action(event);
+    };
+
+    node.addEventListener("pointerdown", run);
+    node.addEventListener("click", run);
+  }
+
+  function swatchButton(color, active, action) {
+    const button = el("button", {
+      type: "button",
+      class: "tmhl-swatch",
+      "aria-label": `${COLOR_LABEL[color]} highlight`,
+      "aria-pressed": active ? "true" : "false",
+      title: COLOR_LABEL[color],
+      style: `--sw: var(--tmhl-${color}-2)`
+    });
+
+    bindPress(button, () => action(color));
+    return button;
+  }
+
+  function toolButton(icon, label, action, extraClass) {
+    const button = el("button", {
+      type: "button",
+      class: `tmhl-tool ${extraClass || ""}`.trim(),
+      title: label,
+      "aria-label": label,
+      "data-tmhl-label": label,
+      html: icon
+    });
+
+    bindPress(button, action);
+    return button;
+  }
+
+  function closeToolbarMenu() {
+    if (!toolbarMenu || !toolbarMoreButton) return;
+
+    toolbarMenu.classList.remove("tmhl-open", "tmhl-menu-left");
+    toolbarMoreButton.setAttribute("aria-expanded", "false");
+  }
+
+  function positionToolbarMenu() {
+    if (
+      !toolbar ||
+      !toolbarMenu ||
+      !toolbarMenu.classList.contains("tmhl-open")
+    ) {
+      return;
+    }
+
+    toolbarMenu.classList.remove("tmhl-menu-left");
+    toolbarMenu.style.top = "0";
+    toolbarMenu.style.bottom = "auto";
+    toolbarMenu.style.left = "calc(100% + 8px)";
+    toolbarMenu.style.right = "auto";
+
+    window.requestAnimationFrame(() => {
+      if (!toolbarMenu || !toolbarMenu.classList.contains("tmhl-open")) return;
+
+      const bounds = viewportBounds();
+      const toolbarRect = toolbar.getBoundingClientRect();
+      const menuWidth = toolbarMenu.offsetWidth;
+      const menuHeight = toolbarMenu.offsetHeight;
+      const gap = 8;
+      const roomRight =
+        toolbarRect.right + gap + menuWidth <= bounds.right - 8;
+      const roomLeft = toolbarRect.left - gap - menuWidth >= bounds.left + 8;
+
+      if (!roomRight && roomLeft) {
+        toolbarMenu.classList.add("tmhl-menu-left");
+      }
+
+      const desiredTop = clamp(
+        toolbarRect.top,
+        bounds.top + 8,
+        Math.max(bounds.top + 8, bounds.bottom - menuHeight - 8)
+      );
+
+      toolbarMenu.style.top = `${Math.round(desiredTop - toolbarRect.top)}px`;
+    });
+  }
+
+  function toggleToolbarMenu() {
+    if (!toolbarMenu || !toolbarMoreButton) return;
+
+    const opening = !toolbarMenu.classList.contains("tmhl-open");
+
+    if (!opening) {
+      closeToolbarMenu();
+      return;
+    }
+
+    toolbarMenu.classList.add("tmhl-open");
+    toolbarMoreButton.setAttribute("aria-expanded", "true");
+    positionToolbarMenu();
+  }
+
+  function setToolbarCoordinates(left, top) {
+    if (!toolbar || toolbar.hidden) return;
+
+    const bounds = viewportBounds();
+    const width = toolbar.offsetWidth || 46;
+    const height = toolbar.offsetHeight || 230;
+    const margin = 8;
+    const safeLeft = clamp(
+      left,
+      bounds.left + margin,
+      Math.max(bounds.left + margin, bounds.right - width - margin)
+    );
+    const safeTop = clamp(
+      top,
+      bounds.top + margin,
+      Math.max(bounds.top + margin, bounds.bottom - height - margin)
+    );
+
+    toolbar.style.left = `${Math.round(safeLeft)}px`;
+    toolbar.style.top = `${Math.round(safeTop)}px`;
+    toolbar.style.transform = "none";
+    toolbar.style.visibility = "visible";
+  }
+
+  function saveToolbarPosition() {
+    if (!toolbar || toolbar.hidden) return;
+
+    const bounds = viewportBounds();
+    const rect = toolbar.getBoundingClientRect();
+
+    settings.toolbar = {
+      pinned: true,
+      xPct: clamp(
+        (rect.left + rect.width / 2 - bounds.left) / bounds.width,
+        0,
+        1
+      ),
+      yPct: clamp(
+        (rect.top + rect.height / 2 - bounds.top) / bounds.height,
+        0,
+        1
+      )
+    };
+
+    saveSettings();
+  }
+
+  function resetToolbarPosition() {
+    settings.toolbar = {
+      ...DEFAULT_SETTINGS.toolbar,
+      pinned: false
+    };
+
+    saveSettings();
+    closeToolbarMenu();
+
+    if (toolbar && !toolbar.hidden && toolbarAnchorRect) {
+      positionToolbar(toolbarAnchorRect);
+    }
+  }
+
+  function positionToolbar(rect) {
+    if (!toolbar) return;
+    if (rect) toolbarAnchorRect = rect;
+
+    toolbar.style.visibility = "hidden";
+    toolbar.hidden = false;
+
+    window.requestAnimationFrame(() => {
+      if (toolbar.hidden || toolbarDragging) return;
+
+      const bounds = viewportBounds();
+      const width = toolbar.offsetWidth;
+      const height = toolbar.offsetHeight;
+
+      if (settings.toolbar && settings.toolbar.pinned) {
+        setToolbarCoordinates(
+          bounds.left + settings.toolbar.xPct * bounds.width - width / 2,
+          bounds.top + settings.toolbar.yPct * bounds.height - height / 2
+        );
+        return;
+      }
+
+      const anchor = rect || toolbarAnchorRect;
+
+      if (!anchor) {
+        setToolbarCoordinates(
+          bounds.right - width - 12,
+          bounds.top + bounds.height / 2 - height / 2
+        );
+        return;
+      }
+
+      const gap = isTouch() || isNarrow() ? 11 : 10;
+      const right = anchor.right + gap;
+      const left = anchor.left - width - gap;
+      const selectedLeft =
+        right + width <= bounds.right - 8 ? right : left;
+      const centeredTop = anchor.top + anchor.height / 2 - height / 2;
+
+      setToolbarCoordinates(selectedLeft, centeredTop);
+    });
+  }
+
+  function buildToolbarGrip() {
+    const grip = el("button", {
+      type: "button",
+      class: "tmhl-toolbar-grip",
+      "aria-label": "Move highlight controls",
+      title: "Drag to move. Double-click to follow selection.",
+      html: ICON.grip
+    });
+
+    let drag = null;
+
+    grip.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      closeToolbarMenu();
+
+      const rect = toolbar.getBoundingClientRect();
+      drag = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startLeft: rect.left,
+        startTop: rect.top,
+        moved: false
+      };
+      toolbarDragging = true;
+
+      try {
+        grip.setPointerCapture(event.pointerId);
+      } catch {
+        /* Pointer capture is optional. */
+      }
+    });
+
+    grip.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+
+      const deltaX = event.clientX - drag.startX;
+      const deltaY = event.clientY - drag.startY;
+      const threshold = isTouch() ? 8 : 4;
+
+      if (!drag.moved && Math.hypot(deltaX, deltaY) < threshold) return;
+
+      drag.moved = true;
+      toolbar.classList.add("tmhl-dragging");
+      setToolbarCoordinates(drag.startLeft + deltaX, drag.startTop + deltaY);
+    });
+
+    const finish = (event) => {
+      if (
+        !drag ||
+        (event.pointerId !== undefined && event.pointerId !== drag.pointerId)
+      ) {
+        return;
+      }
+
+      const moved = drag.moved;
+      const pointerId = drag.pointerId;
+      drag = null;
+      toolbarDragging = false;
+      toolbar.classList.remove("tmhl-dragging");
+
+      try {
+        grip.releasePointerCapture(pointerId);
+      } catch {
+        /* Ignore released capture. */
+      }
+
+      if (moved) saveToolbarPosition();
+    };
+
+    grip.addEventListener("pointerup", finish);
+    grip.addEventListener("pointercancel", finish);
+    grip.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    grip.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      resetToolbarPosition();
+    });
+    grip.addEventListener("keydown", (event) => {
+      const direction = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1]
+      }[event.key];
+
+      if (!direction) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const rect = toolbar.getBoundingClientRect();
+      const step = event.shiftKey ? 18 : 8;
+      setToolbarCoordinates(
+        rect.left + direction[0] * step,
+        rect.top + direction[1] * step
+      );
+      saveToolbarPosition();
+    });
+
+    return grip;
+  }
+
+  function buildToolbarLayout(swatches, actions) {
+    toolbar.replaceChildren();
+
+    const rail = el("div", { class: "tmhl-color-rail" });
+    swatches.forEach((swatch) => rail.appendChild(swatch));
+
+    toolbarMoreButton = el("button", {
+      type: "button",
+      class: "tmhl-toolbar-more",
+      "aria-label": "More highlight actions",
+      "aria-haspopup": "true",
+      "aria-expanded": "false",
+      "aria-controls": "tmhl-toolbar-menu",
+      title: "More actions",
+      html: ICON.more
+    });
+    bindPress(toolbarMoreButton, toggleToolbarMenu);
+
+    toolbarMenu = el("div", {
+      id: "tmhl-toolbar-menu",
+      class: "tmhl-toolbar-menu",
+      role: "group",
+      "aria-label": "More highlight actions"
+    });
+
+    actions.forEach((button) => toolbarMenu.appendChild(button));
+    toolbarMenu.appendChild(
+      toolButton(ICON.move, "Follow selection", resetToolbarPosition)
+    );
+
+    // Menu on top, colors in the middle, drag grip at the bottom.
+    toolbar.append(
+      toolbarMoreButton,
+      el("div", { class: "tmhl-toolbar-sep", "aria-hidden": "true" }),
+      rail,
+      el("div", { class: "tmhl-toolbar-sep", "aria-hidden": "true" }),
+      buildToolbarGrip(),
+      toolbarMenu
+    );
+  }
+
+  function hideToolbar(reset) {
+    if (toolbar) {
+      closeToolbarMenu();
+      toolbar.hidden = true;
+      toolbar.style.visibility = "";
+      toolbar.classList.remove("tmhl-dragging");
+    }
+
+    toolbarDragging = false;
+
+    if (reset !== false) {
+      captured = null;
+      activeId = null;
+    }
+  }
+
+  function showCreateToolbar(rect) {
+    if (!toolbar) return;
+
+    activeId = null;
+
+    const swatches = COLORS.map((color) =>
+      swatchButton(
+        color,
+        color === settings.defaultColor,
+        (picked) => commitHighlight(picked)
+      )
+    );
+
+    const actions = [
+      toolButton(ICON.copy, "Copy text", async () => {
+        if (!captured) return;
+
+        const success = await copyText(captured.exact);
+        hideToolbar();
+        toast(success ? "Copied." : "Copy blocked by the browser.");
+      }),
+      toolButton(ICON.list, "Open highlights", () => {
+        hideToolbar();
+        openPanel();
+      }),
+      toolButton(ICON.close, "Close", () => hideToolbar())
+    ];
+
+    buildToolbarLayout(swatches, actions);
+    positionToolbar(rect);
+  }
+
+  function showEditToolbar(id, rect) {
+    const record = findRecord(id);
+
+    if (!toolbar || !record || record.deleted) return;
+
+    captured = null;
+    activeId = id;
+
+    const swatches = COLORS.map((color) =>
+      swatchButton(color, color === record.color, (picked) =>
+        recolorHighlight(id, picked)
+      )
+    );
+
+    const actions = [
+      toolButton(ICON.note, record.note ? "Edit note" : "Add note", () => {
+        hideToolbar();
+        openPanel();
+        startNoteEdit(id);
+      }),
+      toolButton(ICON.copy, "Copy text", async () => {
+        const success = await copyText(record.exact);
+        hideToolbar();
+        toast(success ? "Copied." : "Copy blocked by the browser.");
+      }),
+      toolButton(ICON.list, "Open highlights", () => {
+        hideToolbar();
+        openPanel();
+      }),
+      toolButton(
+        ICON.trash,
+        "Delete highlight",
+        () => deleteHighlight(id),
+        "tmhl-danger"
+      ),
+      toolButton(ICON.close, "Close", () => hideToolbar())
+    ];
+
+    buildToolbarLayout(swatches, actions);
+    positionToolbar(rect);
+  }
+
+  /* ------------------------------------------------------------------
+   * Selection capture
+   * ---------------------------------------------------------------- */
+
+  let selectionTimer = 0;
+
+  function overlapsRendered(root, start, end) {
+    return rendered.filter(
+      (item) => item.root === root && start < item.end && end > item.start
+    );
+  }
+
+  function selectionCanBeCaptured() {
+    const selection = window.getSelection();
+
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return false;
+    }
+
+    const node = selection.anchorNode;
+    const element =
+      node && node.nodeType === Node.ELEMENT_NODE
+        ? node
+        : node && node.parentElement;
+
+    if (
+      element &&
+      element.closest(
+        '[data-tmhl-ui], input, textarea, select, [contenteditable="true"]'
+      )
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function captureSelection() {
+    const selection = window.getSelection();
+
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return;
+    }
+
+    const range = selection.getRangeAt(0).cloneRange();
+    const root = rootFromNode(range.startContainer);
+
+    if (!root || !root.contains(range.endContainer)) return;
+    if (root.closest("[data-tmhl-ui]")) return;
+
+    const chatId = currentChatId();
+
+    if (!chatId) {
+      hideToolbar();
+      toast("Open a saved chat before highlighting.");
+      return;
+    }
+
+    bumpTextCache();
+
+    const offsets = rangeToOffsets(root, range);
+    if (!offsets) return;
+
+    const text = rootText(root);
+    const exact = text.slice(offsets.start, offsets.end);
+    if (!exact.trim()) return;
+
+    const rect = rangeRect(range);
+    if (!rect) return;
+
+    const overlaps = overlapsRendered(root, offsets.start, offsets.end);
+    const containedInOne =
+      overlaps.length === 1 &&
+      overlaps[0].start <= offsets.start &&
+      overlaps[0].end >= offsets.end;
+
+    if (containedInOne) {
+      showEditToolbar(overlaps[0].record.id, rect);
+      return;
+    }
+
+    let start = offsets.start;
+    let end = offsets.end;
+
+    overlaps.forEach((item) => {
+      start = Math.min(start, item.start);
+      end = Math.max(end, item.end);
+    });
+
+    captured = {
+      chatId,
+      root,
+    
