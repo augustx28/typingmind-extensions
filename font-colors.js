@@ -10,10 +10,10 @@
   // EDIT COLORS HERE. Example: bold: '#eeeae5'
   const COLORS = {
     body: '#dedbd7', // Regular response text: warm light gray
-    bold: 'dedbd7',        // Bold text
-    headings: 'dedbd7',    // Shared heading color, including table headers
-    bullets: 'dedbd7',     // Bullet dots only, not the text beside them
-    numbers: 'dedbd7'      // Automatic list numbers only, not typed numbers
+    bold: '#dedbd7',        // Bold text
+    headings: '#dedbd7',    // Shared heading color, including table headers
+    bullets: '#dedbd7',     // Bullet dots only, not the text beside them
+    numbers: '#dedbd7'      // Automatic list numbers only, not typed numbers
   };
 
   const STYLE_ID = 'tm-warm-gray-response-text';
