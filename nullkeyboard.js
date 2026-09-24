@@ -1,10 +1,33 @@
-/* TypingMind: kill auto-focus so the mobile keyboard stops popping open.
+/* TypingMind: kill auto-focus so the mobile keyboard stops popping open.  v2
    Covers the chat input (same as before) + text fields inside panels/popups
    like the plugins panel, tool switcher, model list, dialogs.
-   Real taps and Tab-key navigation still focus normally. */
+   Real taps and Tab-key navigation still focus normally.
+
+   v2: only runs on touch screens. TypingMind syncs extensions across your
+   devices, so without this check it also ran on desktop and blocked
+   shortcut-driven focus (search, new chat box, dialogs). Also guards
+   against loading twice. */
 
 (function () {
   'use strict';
+
+  if (window.__nullKbd) return;
+
+  // Set to true only if you want this on mouse-and-keyboard screens too.
+  const DESKTOP_TOO = false;
+
+  // Phones and tablets without a trackpad. A tablet with a keyboard and
+  // trackpad attached reports as desktop, which is right: no pop-up keyboard.
+  const touchUI = (() => {
+    try {
+      return window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+    } catch (e) {
+      return 'ontouchstart' in window;
+    }
+  })();
+
+  if (!touchUI && !DESKTOP_TOO) return;
+  window.__nullKbd = true;
 
   // Flip to true, open the plugin panel, then read the console to see exactly
   // which element grabs focus. Add its selector to EXTRA_GUARDED below if needed.
@@ -143,7 +166,8 @@
         if (node.hasAttribute && node.hasAttribute('autofocus')) {
           node.removeAttribute('autofocus');
         }
-        if (node.querySelectorAll) {
+        // Skip leaf nodes: streaming replies add lots of them
+        if (node.firstElementChild && node.querySelectorAll) {
           node.querySelectorAll('[autofocus]').forEach((k) =>
             k.removeAttribute('autofocus')
           );
