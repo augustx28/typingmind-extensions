@@ -1,34 +1,39 @@
-// TypingMind Page Outline Extension v4.3
+// TypingMind Page Outline Extension v4.6
 // Groups response headings beneath each user input.
 // Toggle button (draggable) or Ctrl/Cmd + Shift + O.
 //
-// v4.3 changes:
-// - The toggle button can be dragged anywhere on screen with mouse, touch,
-//   or pen (Pointer Events + touch-action: none, so a touch drag never
-//   scrolls the chat). Position is saved to localStorage and restored.
-// - A drag never fires the toggle; a tap/click still opens and closes.
-// - The panel now anchors to the button: it flips above/below and
-//   left/right based on available space, and its max-height is sized to
-//   the viewport instead of assuming the button sits top-right.
-// - Double-click / double-tap the button snaps it back to the default spot.
-// - Escape closes the panel.
-// - Fixed: on long streaming replies the 450 ms debounce kept resetting, so
-//   the outline never updated until the stream paused. Added a 1.6 s max
-//   wait so it refreshes while text is still arriving.
-// - Fixed: model-icon SVGs were re-serialized to data URIs on every
-//   refresh. Now cached per icon element.
-// - Refresh work is skipped entirely while the panel is closed.
-// - isRendered() checks layout boxes before calling getComputedStyle
-//   (cheaper on very long chats).
-// - Loading this script now tears down any previous version first, and
-//   window.__tmPageOutline.destroy() removes everything cleanly.
-//   Note: still reload the page after swapping versions, so the old
-//   copy's listeners are gone for good.
+// v4.6 changes (built on v4.3):
+// - Multi-model chats: clicking a heading or input that belongs to another
+//   model now switches TypingMind to that model's tab first, exactly as if
+//   you clicked the tab yourself, then scrolls to the heading. Headings no
+//   longer land hidden under the sticky model tab bar.
+// - The button no longer wanders after a window resize. Its spot is saved
+//   relative to the nearest corner of the screen. Shrinking the window only
+//   pushes it inward while the window is too small; restore the window and
+//   it goes back to exactly where you left it.
+// - Touch: the button only moves after you hold it for 250 ms, so a quick
+//   swipe or sloppy tap that starts on it can't drag it away. Mouse drags
+//   work as before. Double-tap to reset now works on phones too.
+// - Model icons only come from the model's own response card, so a stray
+//   avatar from the sidebar can't show up next to a heading.
+// - Faster on long chats and during streaming:
+//   - The "am I on a chat page" check runs at most ~8 times a second and
+//     only when elements are added or removed, not on every streamed token.
+//   - The outline list is patched in place instead of rebuilt, so a tap on
+//     an item can't get lost when a refresh lands mid-tap.
+//   - Prompt text and thinking-block checks are cached per element.
+//   - Removed a fallback that measured every div on the page whenever the
+//     chat was empty.
+// - Headings are only taken from AI responses, so headings from dialogs or
+//   the empty-chat screen never leak into the outline.
+// - If a message re-renders (a reply finishing its stream, for example)
+//   right before you click it, the outline finds the new copy instead of
+//   doing nothing.
 
 (function () {
   'use strict';
 
-  const VERSION = '4.3';
+  const VERSION = '4.6';
   const NAMESPACE = '__tmPageOutline';
 
   const PANEL_ID = 'tm-page-outline-panel';
@@ -38,6 +43,21 @@
 
   const USER_MESSAGE_SELECTOR = '[data-element-id="user-message"]';
   const AI_RESPONSE_SELECTOR = '[data-element-id="ai-response"]';
+  const CHAT_SCROLLER_SELECTOR = '[data-element-id="chat-space-middle-part"]';
+  const CHAT_SPACE_SELECTOR = '[data-element-id="chat-space"]';
+
+  // Every user input plus every h1-h4 inside an AI response, returned by the
+  // browser already in document order.
+  const OUTLINE_ITEM_SELECTOR = [
+    USER_MESSAGE_SELECTOR,
+    ...['h1', 'h2', 'h3', 'h4'].map((tag) => `${AI_RESPONSE_SELECTOR} ${tag}`)
+  ].join(', ');
+
+  // Multi-model chats: each model's reply is a card <div id="response-...">
+  // inside a horizontal rail, with a sticky tab bar above the rail.
+  const RESPONSE_CARD_SELECTOR = 'div[id^="response-"]';
+  const MODEL_AVATAR_SELECTOR = '.w-7.h-7.rounded-full';
+  const SELECTED_TAB_CLASS = 'border-blue-500';
 
   // Containers that hold the model's thinking / reasoning output.
   // Headings inside any of these are skipped.
@@ -60,13 +80,30 @@
   const PANEL_GAP = 8;
   const MIN_PANEL_HEIGHT = 140;
   const DEFAULT_PANEL_WIDTH = 270;
+  const SCROLL_TOP_GAP = 10;
+
+  const DEFAULT_ANCHOR = Object.freeze({
+    x: 'right',
+    dx: 12,
+    y: 'top',
+    dy: 50
+  });
 
   // Interaction
-  const DRAG_THRESHOLD = 4;
-  const CLICK_SUPPRESS_MS = 250;
+  const MOUSE_DRAG_THRESHOLD = 5;
+  const TOUCH_HOLD_MS = 250;
+  const TOUCH_SLOP = 10;
+  const DOUBLE_TAP_MS = 320;
+  const CLICK_SUPPRESS_MS = 450;
+  const FLASH_DELAY_MS = 180;
   const REFRESH_DEBOUNCE_MS = 450;
   const REFRESH_MAX_WAIT_MS = 1600;
-  const VISIBILITY_DEBOUNCE_MS = 10;
+  const VISIBILITY_THROTTLE_MS = 120;
+
+  // Text limits
+  const PROMPT_PREVIEW_LENGTH = 180;
+  const PROMPT_TITLE_LENGTH = 1000;
+  const PROMPT_LABEL_LENGTH = 300;
 
   let panelVisible = false;
   let destroyed = false;
@@ -75,18 +112,27 @@
   let refreshTimer = null;
   let visibilityTimer = null;
   let refreshPendingSince = 0;
-  let lastOutlineSignature = null;
   let nextNodeId = 1;
+  let currentEntries = [];
 
+  // anchor = where you put the button (saved, never changed by a resize).
+  // buttonPosition = where it is drawn right now (anchor fitted to window).
+  let anchor = null;
   let buttonPosition = null;
+
   let dragState = null;
   let dragFrame = null;
   let resizeFrame = null;
-  let lastDragEndTime = 0;
+  let suppressClickUntil = 0;
+  let lastTapTime = 0;
+  let navigationToken = 0;
+  let clickingTab = false;
 
   const nodeIds = new WeakMap();
   const flashTimers = new WeakMap();
   const iconCache = new WeakMap();
+  const promptCache = new WeakMap();
+  const thinkingCache = new WeakMap();
 
   removePreviousInstance();
 
@@ -163,6 +209,7 @@
           box-shadow 0.2s;
         user-select: none;
         -webkit-user-select: none;
+        -webkit-touch-callout: none;
         touch-action: none;
         -webkit-tap-highlight-color: transparent;
       }
@@ -182,9 +229,16 @@
           box-shadow 0.2s;
       }
 
-      #${TOGGLE_ID}:hover {
-        background: rgba(180, 180, 180, 0.35);
-        color: rgba(60, 60, 60, 0.9);
+      @media (hover: hover) {
+        #${TOGGLE_ID}:hover {
+          background: rgba(180, 180, 180, 0.35);
+          color: rgba(60, 60, 60, 0.9);
+        }
+
+        .dark #${TOGGLE_ID}:hover {
+          background: rgba(255, 255, 255, 0.15);
+          color: rgba(220, 220, 220, 0.85);
+        }
       }
 
       #${TOGGLE_ID}:active {
@@ -199,6 +253,7 @@
 
       #${TOGGLE_ID}.dragging {
         cursor: grabbing;
+        opacity: 1;
         background: rgba(180, 180, 180, 0.45);
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
         transition:
@@ -217,11 +272,6 @@
         background: rgba(255, 255, 255, 0.08);
         color: rgba(200, 200, 200, 0.55);
         border-color: rgba(255, 255, 255, 0.08);
-      }
-
-      .dark #${TOGGLE_ID}:hover {
-        background: rgba(255, 255, 255, 0.15);
-        color: rgba(220, 220, 220, 0.85);
       }
 
       .dark #${TOGGLE_ID}.active {
@@ -360,6 +410,7 @@
         display: flex;
         align-items: flex-start;
         gap: 6px;
+        -webkit-tap-highlight-color: transparent;
       }
 
       #${PANEL_ID} .outline-item:hover {
@@ -550,24 +601,32 @@
 
   // ---------------------------------------------------------------------------
   // Button position
+  //
+  // The saved spot is an anchor: which horizontal edge (left/right) and
+  // which vertical edge (top/bottom) the button is nearest to, plus the
+  // distance from each. A resize re-fits the anchor to the new window but
+  // never overwrites it, so shrinking and restoring the window is lossless.
+  // Only a drag or a reset changes the anchor.
   // ---------------------------------------------------------------------------
 
-  function getDefaultPosition() {
+  function getViewport() {
     return {
-      left: window.innerWidth - BUTTON_SIZE - 12,
-      top: 50
+      width: window.innerWidth,
+      height: window.innerHeight
     };
   }
 
   function clampPosition(position) {
+    const { width, height } = getViewport();
+
     const maxLeft = Math.max(
       EDGE_MARGIN,
-      window.innerWidth - BUTTON_SIZE - EDGE_MARGIN
+      width - BUTTON_SIZE - EDGE_MARGIN
     );
 
     const maxTop = Math.max(
       EDGE_MARGIN,
-      window.innerHeight - BUTTON_SIZE - EDGE_MARGIN
+      height - BUTTON_SIZE - EDGE_MARGIN
     );
 
     return {
@@ -580,40 +639,92 @@
     };
   }
 
-  function loadPosition() {
+  function isValidAnchor(value) {
+    return Boolean(
+      value &&
+      (value.x === 'left' || value.x === 'right') &&
+      (value.y === 'top' || value.y === 'bottom') &&
+      Number.isFinite(value.dx) &&
+      Number.isFinite(value.dy)
+    );
+  }
+
+  function anchorToPosition(value) {
+    const { width, height } = getViewport();
+
+    return clampPosition({
+      left: value.x === 'right'
+        ? width - BUTTON_SIZE - value.dx
+        : value.dx,
+      top: value.y === 'bottom'
+        ? height - BUTTON_SIZE - value.dy
+        : value.dy
+    });
+  }
+
+  function positionToAnchor(position) {
+    const { width, height } = getViewport();
+    const placed = clampPosition(position);
+
+    const nearRight = placed.left + BUTTON_SIZE / 2 > width / 2;
+    const nearBottom = placed.top + BUTTON_SIZE / 2 > height / 2;
+
+    return {
+      x: nearRight ? 'right' : 'left',
+      dx: Math.round(
+        nearRight ? width - BUTTON_SIZE - placed.left : placed.left
+      ),
+      y: nearBottom ? 'bottom' : 'top',
+      dy: Math.round(
+        nearBottom ? height - BUTTON_SIZE - placed.top : placed.top
+      )
+    };
+  }
+
+  function loadAnchor() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
 
       if (!raw) {
-        return clampPosition(getDefaultPosition());
+        return { ...DEFAULT_ANCHOR };
       }
 
       const saved = JSON.parse(raw);
 
-      if (
-        !saved ||
-        !Number.isFinite(saved.left) ||
-        !Number.isFinite(saved.top)
-      ) {
-        return clampPosition(getDefaultPosition());
+      if (isValidAnchor(saved)) {
+        return {
+          x: saved.x,
+          dx: saved.dx,
+          y: saved.y,
+          dy: saved.dy
+        };
       }
 
-      return clampPosition(saved);
+      // v4.3 and older saved raw left/top pixels. Convert once.
+      if (
+        saved &&
+        Number.isFinite(saved.left) &&
+        Number.isFinite(saved.top)
+      ) {
+        const migrated = positionToAnchor(saved);
+        writeAnchor(migrated);
+        return migrated;
+      }
     } catch (error) {
       console.debug(
         '[Page Outline] Could not read the saved button position.',
         error
       );
-
-      return clampPosition(getDefaultPosition());
     }
+
+    return { ...DEFAULT_ANCHOR };
   }
 
-  function savePosition() {
+  function writeAnchor(value) {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify(buttonPosition)
+        JSON.stringify({ v: 2, ...value })
       );
     } catch (error) {
       console.debug(
@@ -632,11 +743,16 @@
     button.style.top = `${buttonPosition.top}px`;
   }
 
-  function resetPosition() {
-    buttonPosition = clampPosition(getDefaultPosition());
+  function fitButtonToWindow() {
+    buttonPosition = anchorToPosition(anchor);
     applyButtonPosition();
+  }
+
+  function resetPosition() {
+    anchor = { ...DEFAULT_ANCHOR };
+    writeAnchor(anchor);
+    fitButtonToWindow();
     positionPanel();
-    savePosition();
   }
 
   // ---------------------------------------------------------------------------
@@ -648,8 +764,7 @@
 
     if (!panel || !buttonPosition) return;
 
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
+    const { width: viewportWidth, height: viewportHeight } = getViewport();
 
     const buttonBottom = buttonPosition.top + BUTTON_SIZE;
 
@@ -708,44 +823,109 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Dragging
+  // Dragging and tapping
+  //
+  // Mouse: press and move 5px to drag; a plain click toggles.
+  // Touch / pen: hold 250 ms (the button lifts), then move to drag. A touch
+  // that moves before the hold finishes is treated as a swipe and ignored.
+  // Taps are handled here on pointerup, because some phones drop the
+  // browser's own click after a long press.
   // ---------------------------------------------------------------------------
+
+  function clearHoldTimer(state) {
+    if (state && state.holdTimer) {
+      clearTimeout(state.holdTimer);
+      state.holdTimer = null;
+    }
+  }
 
   function handleDragStart(event) {
     if (event.isPrimary === false) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    if (!buttonPosition) return;
 
-    dragState = {
+    clearHoldTimer(dragState);
+
+    const button = event.currentTarget;
+    const touchLike = event.pointerType !== 'mouse';
+
+    const state = {
       pointerId: event.pointerId,
+      touchLike,
       startX: event.clientX,
       startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
       originLeft: buttonPosition.left,
       originTop: buttonPosition.top,
-      moved: false
+      armed: !touchLike,
+      cancelled: false,
+      moved: false,
+      holdTimer: null
     };
 
+    if (touchLike) {
+      state.holdTimer = setTimeout(() => {
+        state.holdTimer = null;
+
+        if (dragState !== state || state.cancelled) return;
+
+        state.armed = true;
+
+        // Measure the drag from where the finger is now, so any wobble
+        // during the hold doesn't make the button jump.
+        state.startX = state.lastX;
+        state.startY = state.lastY;
+
+        button.classList.add('dragging');
+
+        try {
+          if (navigator.vibrate) navigator.vibrate(8);
+        } catch (error) {
+          // Haptics are optional.
+        }
+      }, TOUCH_HOLD_MS);
+    }
+
+    dragState = state;
+
     try {
-      event.currentTarget.setPointerCapture(event.pointerId);
+      button.setPointerCapture(event.pointerId);
     } catch (error) {
       // Capture is a nicety; window listeners still track the pointer.
     }
   }
 
   function handleDragMove(event) {
-    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    const state = dragState;
 
-    const deltaX = event.clientX - dragState.startX;
-    const deltaY = event.clientY - dragState.startY;
+    if (!state || event.pointerId !== state.pointerId) return;
+    if (state.cancelled) return;
 
-    if (!dragState.moved) {
-      if (
-        Math.abs(deltaX) < DRAG_THRESHOLD &&
-        Math.abs(deltaY) < DRAG_THRESHOLD
-      ) {
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+
+    const deltaX = event.clientX - state.startX;
+    const deltaY = event.clientY - state.startY;
+
+    if (!state.moved) {
+      const distance = Math.max(Math.abs(deltaX), Math.abs(deltaY));
+
+      if (!state.armed) {
+        // A touch that travels before the hold finishes is a swipe.
+        if (distance > TOUCH_SLOP) {
+          state.cancelled = true;
+          clearHoldTimer(state);
+        }
+
         return;
       }
 
-      dragState.moved = true;
+      const threshold = state.touchLike ? 2 : MOUSE_DRAG_THRESHOLD;
+
+      if (distance < threshold) return;
+
+      state.moved = true;
 
       const button = document.getElementById(TOGGLE_ID);
 
@@ -761,8 +941,8 @@
     }
 
     buttonPosition = clampPosition({
-      left: dragState.originLeft + deltaX,
-      top: dragState.originTop + deltaY
+      left: state.originLeft + deltaX,
+      top: state.originTop + deltaY
     });
 
     if (dragFrame) return;
@@ -778,25 +958,26 @@
   }
 
   function handleDragEnd(event) {
-    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    const state = dragState;
 
-    const wasDragged = dragState.moved;
-    const pointerId = dragState.pointerId;
-    const button = document.getElementById(TOGGLE_ID);
+    if (!state || event.pointerId !== state.pointerId) return;
 
     dragState = null;
+    clearHoldTimer(state);
 
     if (dragFrame) {
       cancelAnimationFrame(dragFrame);
       dragFrame = null;
     }
 
+    const button = document.getElementById(TOGGLE_ID);
+
     if (button) {
       button.classList.remove('dragging');
 
       try {
-        if (button.hasPointerCapture(pointerId)) {
-          button.releasePointerCapture(pointerId);
+        if (button.hasPointerCapture(state.pointerId)) {
+          button.releasePointerCapture(state.pointerId);
         }
       } catch (error) {
         // Nothing to release.
@@ -805,18 +986,41 @@
 
     document.body.classList.remove('tm-outline-dragging');
 
-    if (!wasDragged) return;
+    if (state.moved) {
+      // Swallow the click that fires right after a drag.
+      suppressClickUntil = performance.now() + CLICK_SUPPRESS_MS;
 
-    // Swallow the click that fires right after a drag.
-    lastDragEndTime = performance.now();
+      anchor = positionToAnchor(buttonPosition);
+      writeAnchor(anchor);
+      fitButtonToWindow();
 
-    applyButtonPosition();
+      if (panelVisible) {
+        positionPanel();
+      }
 
-    if (panelVisible) {
-      positionPanel();
+      return;
     }
 
-    savePosition();
+    // Mouse clicks and keyboard presses go through the normal click event.
+    if (!state.touchLike) return;
+
+    // Touch / pen: this pointerup is the tap. Ignore the click that follows.
+    suppressClickUntil = performance.now() + CLICK_SUPPRESS_MS;
+
+    if (state.cancelled || event.type !== 'pointerup') return;
+
+    const now = performance.now();
+
+    if (now - lastTapTime < DOUBLE_TAP_MS) {
+      // Double-tap: undo the first tap's toggle and reset the spot.
+      lastTapTime = 0;
+      togglePanel();
+      resetPosition();
+      return;
+    }
+
+    lastTapTime = now;
+    togglePanel();
   }
 
   // ---------------------------------------------------------------------------
@@ -832,7 +1036,7 @@
     button.type = 'button';
 
     button.title =
-      'Outline · drag to move · double-click to reset · Ctrl/Cmd + Shift + O';
+      'Outline · drag to move (hold first on touch) · double-click to reset · Ctrl/Cmd + Shift + O';
 
     button.setAttribute('aria-label', 'Toggle chat outline');
     button.setAttribute('aria-expanded', 'false');
@@ -864,6 +1068,11 @@
     button.addEventListener('click', handleToggleClick);
     button.addEventListener('dblclick', handleToggleDoubleClick);
 
+    // A long press must not open the phone's context menu or callout.
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+    });
+
     document.body.appendChild(button);
   }
 
@@ -883,6 +1092,12 @@
       <ul class="outline-list"></ul>
     `;
 
+    const list = panel.querySelector('.outline-list');
+
+    // One delegated listener for every item, so items can be reused.
+    list.addEventListener('click', handleListClick);
+    list.addEventListener('keydown', handleListKeydown);
+
     document.body.appendChild(panel);
 
     positionPanel();
@@ -894,8 +1109,8 @@
 
   function isOnChatPage() {
     const chatSignals = [
-      '[data-element-id="chat-space-middle-part"]',
-      '[data-element-id="chat-space"]',
+      CHAT_SCROLLER_SELECTOR,
+      CHAT_SPACE_SELECTOR,
       '[data-element-id="chat-input-textbox"]',
       USER_MESSAGE_SELECTOR,
       AI_RESPONSE_SELECTOR,
@@ -978,6 +1193,10 @@
     if (visible) {
       refreshOutline();
       positionPanel();
+    } else if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
+      refreshPendingSince = 0;
     }
   }
 
@@ -986,7 +1205,7 @@
   }
 
   function handleToggleClick(event) {
-    if (performance.now() - lastDragEndTime < CLICK_SUPPRESS_MS) {
+    if (performance.now() < suppressClickUntil) {
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -1004,71 +1223,44 @@
   // Chat container
   // ---------------------------------------------------------------------------
 
-  function getChatContainer() {
-    const selectors = [
-      '[data-element-id="chat-space-middle-part"]',
-      '[data-element-id="chat-space"]',
-      '.chat-messages',
-      '[role="main"]',
-      'main'
-    ];
+  function containsMessages(element) {
+    return Boolean(
+      element.querySelector(`${USER_MESSAGE_SELECTOR}, ${AI_RESPONSE_SELECTOR}`)
+    );
+  }
 
-    for (const selector of selectors) {
+  function getChatContainer() {
+    for (const selector of [CHAT_SCROLLER_SELECTOR, CHAT_SPACE_SELECTOR]) {
       const element = document.querySelector(selector);
 
-      if (
-        element &&
-        (
-          element.querySelector(USER_MESSAGE_SELECTOR) ||
-          element.querySelector(AI_RESPONSE_SELECTOR)
-        )
-      ) {
+      if (element && containsMessages(element)) {
         return element;
       }
     }
 
+    // Unknown layout: climb from the first message to the element that
+    // holds more than one message.
     const firstMessage = document.querySelector(
       `${USER_MESSAGE_SELECTOR}, ${AI_RESPONSE_SELECTOR}`
     );
 
-    if (firstMessage) {
-      let parent = firstMessage.parentElement;
+    if (!firstMessage) return null;
 
-      while (parent && parent !== document.body) {
-        if (
-          parent.querySelectorAll(
-            `${USER_MESSAGE_SELECTOR}, ${AI_RESPONSE_SELECTOR}`
-          ).length > 1
-        ) {
-          return parent;
-        }
+    let parent = firstMessage.parentElement;
 
-        parent = parent.parentElement;
-      }
-    }
-
-    const candidates = document.querySelectorAll('div[class]');
-    let best = null;
-    let bestArea = 0;
-
-    for (const candidate of candidates) {
+    while (parent && parent !== document.body) {
       if (
-        candidate.scrollHeight <= candidate.clientHeight + 100 ||
-        candidate.clientHeight <= 200
+        parent.querySelectorAll(
+          `${USER_MESSAGE_SELECTOR}, ${AI_RESPONSE_SELECTOR}`
+        ).length > 1
       ) {
-        continue;
+        return parent;
       }
 
-      const rect = candidate.getBoundingClientRect();
-      const area = rect.width * rect.height;
-
-      if (area > bestArea) {
-        bestArea = area;
-        best = candidate;
-      }
+      parent = parent.parentElement;
     }
 
-    return best || document.body;
+    return document.body;
   }
 
   // ---------------------------------------------------------------------------
@@ -1077,12 +1269,12 @@
 
   function normalizeText(value) {
     return String(value || '')
-      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/[​-‍﻿]/g, '')
       .replace(/\s+/g, ' ')
       .trim();
   }
 
-  function shortenText(value, maximumLength = 180) {
+  function shortenText(value, maximumLength = PROMPT_PREVIEW_LENGTH) {
     const text = normalizeText(value);
 
     if (text.length <= maximumLength) {
@@ -1090,6 +1282,10 @@
     }
 
     return `${text.slice(0, maximumLength - 1).trim()}…`;
+  }
+
+  function plural(count, word) {
+    return `${count} ${word}${count === 1 ? '' : 's'}`;
   }
 
   function isRendered(element) {
@@ -1101,33 +1297,6 @@
     return getComputedStyle(element).visibility !== 'hidden';
   }
 
-  function isBefore(first, second) {
-    if (!first || !second || first === second) return false;
-
-    return Boolean(
-      first.compareDocumentPosition(second) &
-      Node.DOCUMENT_POSITION_FOLLOWING
-    );
-  }
-
-  function compareByDocumentOrder(first, second) {
-    if (first.element === second.element) return 0;
-
-    const position = first.element.compareDocumentPosition(
-      second.element
-    );
-
-    if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
-      return -1;
-    }
-
-    if (position & Node.DOCUMENT_POSITION_PRECEDING) {
-      return 1;
-    }
-
-    return 0;
-  }
-
   function getNodeId(element) {
     if (!nodeIds.has(element)) {
       nodeIds.set(element, nextNodeId++);
@@ -1136,11 +1305,32 @@
     return nodeIds.get(element);
   }
 
+  function prefersReducedMotion() {
+    try {
+      return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch (error) {
+      return false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Thinking block detection
   // ---------------------------------------------------------------------------
 
   function isInsideThinkingBlock(heading) {
+    // A heading never moves between containers, so the answer is stable.
+    const cached = thinkingCache.get(heading);
+
+    if (cached !== undefined) return cached;
+
+    const result = detectThinkingBlock(heading);
+
+    thinkingCache.set(heading, result);
+
+    return result;
+  }
+
+  function detectThinkingBlock(heading) {
     // Fast path: known thinking / reasoning containers.
     if (heading.closest(THINKING_BLOCK_SELECTOR)) {
       return true;
@@ -1181,6 +1371,10 @@
   // User input extraction
   // ---------------------------------------------------------------------------
 
+  function textFingerprint(text) {
+    return `${text.length}:${text.slice(0, 64)}:${text.slice(-64)}`;
+  }
+
   function extractUserPrompt(messageElement) {
     const editor = messageElement.querySelector('textarea');
 
@@ -1188,6 +1382,23 @@
       return normalizeText(editor.value);
     }
 
+    // Long pasted prompts are expensive to clean up, so reuse the last
+    // result until the message text actually changes.
+    const fingerprint = textFingerprint(messageElement.textContent || '');
+    const cached = promptCache.get(messageElement);
+
+    if (cached && cached.fingerprint === fingerprint) {
+      return cached.text;
+    }
+
+    const text = readUserPrompt(messageElement);
+
+    promptCache.set(messageElement, { fingerprint, text });
+
+    return text;
+  }
+
+  function readUserPrompt(messageElement) {
     const preferredSelectors = [
       '[data-element-id="user-message-content"]',
       '[data-element-id="message-content"]',
@@ -1230,6 +1441,113 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Multi-model response cards
+  // ---------------------------------------------------------------------------
+
+  // The model card a message belongs to, or null for single-model chats.
+  function findResponseCard(element) {
+    let node = element;
+
+    while (node && node !== document.body) {
+      const card = node.closest(RESPONSE_CARD_SELECTOR);
+
+      if (!card) return null;
+
+      // A div with a response-* id inside a reply's own markdown is not a
+      // model card; keep climbing.
+      if (!card.closest(AI_RESPONSE_SELECTOR)) {
+        return card;
+      }
+
+      node = card.parentElement;
+    }
+
+    return null;
+  }
+
+  function getCardTitle(card) {
+    const header = card.querySelector('button');
+
+    return header ? normalizeText(header.textContent) : '';
+  }
+
+  function findTabBar(group, rail) {
+    const siblings = Array.from(group.children).filter((child) => {
+      return child !== rail && Boolean(child.querySelector('button'));
+    });
+
+    return (
+      siblings.find((child) => {
+        return (
+          child.classList.contains('sticky') &&
+          child.classList.contains('top-0')
+        );
+      }) ||
+      null
+    );
+  }
+
+  function pickTab(tabs, cards, card) {
+    if (!tabs.length) return null;
+
+    // Desktop renders every card side by side, in tab order.
+    const index = cards.indexOf(card);
+
+    if (index >= 0 && tabs.length === cards.length) {
+      return tabs[index];
+    }
+
+    // Phone layout renders only the open card, so match the model name.
+    const title = getCardTitle(card);
+
+    if (!title) return null;
+
+    const matches = tabs.filter((tab) => {
+      const label = normalizeText(
+        tab.getAttribute('data-tooltip-content')
+      ).replace(/^Finalized by\s*/i, '');
+
+      return label === title;
+    });
+
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  function getMultiModelContext(element) {
+    const card = findResponseCard(element);
+
+    if (!card) return null;
+
+    const rail = card.parentElement;
+    const group = rail ? rail.parentElement : null;
+
+    if (!rail || !group) {
+      return { card, rail: null, tabBar: null, tab: null };
+    }
+
+    const cards = Array.from(rail.children).filter((child) => {
+      return child.matches(RESPONSE_CARD_SELECTOR);
+    });
+
+    const tabBar = findTabBar(group, rail);
+
+    const tabs = tabBar
+      ? Array.from(tabBar.querySelectorAll(':scope > div > button'))
+      : [];
+
+    return {
+      card,
+      rail,
+      tabBar,
+      tab: pickTab(tabs, cards, card)
+    };
+  }
+
+  function isTabSelected(tab) {
+    return tab.classList.contains(SELECTED_TAB_CLASS);
+  }
+
+  // ---------------------------------------------------------------------------
   // Model icon detection
   // ---------------------------------------------------------------------------
 
@@ -1264,116 +1582,57 @@
     return dataUri;
   }
 
-  function getAllModelIcons() {
-    const icons = [];
+  // The model avatar in a card's header, as an image the panel can show.
+  function getCardIcon(card) {
+    const avatar = card.querySelector(MODEL_AVATAR_SELECTOR);
 
-    const avatars = document.querySelectorAll(
-      '.w-7.h-7.rounded-full'
-    );
+    if (!avatar) return null;
 
-    for (const avatar of avatars) {
-      if (!avatar.isConnected) continue;
+    const computedStyle = getComputedStyle(avatar);
+    const computedBackground = computedStyle.backgroundColor;
 
-      if (avatar.closest(`#${PANEL_ID}, #${TOGGLE_ID}`)) {
-        continue;
-      }
+    let background = '#ffffff';
 
-      if (avatar.closest(USER_MESSAGE_SELECTOR)) {
-        continue;
-      }
+    if (
+      computedBackground &&
+      computedBackground !== 'rgba(0, 0, 0, 0)' &&
+      computedBackground !== 'transparent'
+    ) {
+      background = computedBackground;
+    }
 
-      if (avatar.closest('button[data-tooltip-id="global"]')) {
-        continue;
-      }
+    let iconSrc = null;
 
-      let background = '#ffffff';
-
-      const computedStyle = getComputedStyle(avatar);
-      const computedBackground = computedStyle.backgroundColor;
-
-      if (
-        computedBackground &&
-        computedBackground !== 'rgba(0, 0, 0, 0)' &&
-        computedBackground !== 'transparent'
-      ) {
-        background = computedBackground;
-      }
-
-      if (avatar.tagName === 'IMG' && avatar.src) {
-        icons.push({
-          element: avatar,
-          iconSrc: avatar.src,
-          iconBg: background
-        });
-
-        continue;
-      }
-
+    if (avatar.tagName === 'IMG' && avatar.src) {
+      iconSrc = avatar.src;
+    } else {
       const image = avatar.querySelector('img');
 
       if (image && image.src) {
-        icons.push({
-          element: avatar,
-          iconSrc: image.src,
-          iconBg: background
-        });
+        iconSrc = image.src;
+      } else {
+        const svg = avatar.querySelector('svg');
 
-        continue;
-      }
-
-      const svg = avatar.querySelector('svg');
-
-      if (!svg) continue;
-
-      try {
-        icons.push({
-          element: avatar,
-          iconSrc: getSvgDataUri(
-            svg,
-            computedStyle.color || '#000000'
-          ),
-          iconBg: background
-        });
-      } catch (error) {
-        console.debug(
-          '[Page Outline] Could not copy a model icon.',
-          error
-        );
-      }
-    }
-
-    return icons;
-  }
-
-  function findModelForHeading(heading, modelIcons) {
-    const response = heading.closest(AI_RESPONSE_SELECTOR);
-
-    if (response) {
-      let closestInsideResponse = null;
-
-      for (const modelIcon of modelIcons) {
-        if (
-          response.contains(modelIcon.element) &&
-          isBefore(modelIcon.element, heading)
-        ) {
-          closestInsideResponse = modelIcon;
+        if (svg) {
+          try {
+            iconSrc = getSvgDataUri(svg, computedStyle.color || '#000000');
+          } catch (error) {
+            console.debug(
+              '[Page Outline] Could not copy a model icon.',
+              error
+            );
+          }
         }
       }
-
-      if (closestInsideResponse) {
-        return closestInsideResponse;
-      }
     }
 
-    let closestPrecedingIcon = null;
+    if (!iconSrc) return null;
 
-    for (const modelIcon of modelIcons) {
-      if (isBefore(modelIcon.element, heading)) {
-        closestPrecedingIcon = modelIcon;
-      }
-    }
-
-    return closestPrecedingIcon;
+    return {
+      iconSrc,
+      iconBg: background,
+      iconKey: `${getNodeId(avatar)}|${background}|${iconSrc.length}`
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1414,103 +1673,63 @@
   function getOutlineData() {
     const container = getChatContainer();
 
-    const userMessages = Array.from(
-      container.querySelectorAll(USER_MESSAGE_SELECTOR)
-    ).filter(isRendered);
-
-    const aiResponses = Array.from(
-      container.querySelectorAll(AI_RESPONSE_SELECTOR)
-    ).filter(isRendered);
-
-    let headings = Array.from(
-      container.querySelectorAll('h1, h2, h3, h4')
-    ).filter(isRendered);
-
-    if (aiResponses.length > 0) {
-      headings = headings.filter((heading) => {
-        return Boolean(
-          heading.closest(AI_RESPONSE_SELECTOR)
-        );
-      });
-    } else {
-      headings = headings.filter((heading) => {
-        return !heading.closest(USER_MESSAGE_SELECTOR);
-      });
+    if (!container) {
+      return { entries: [], inputCount: 0, headingCount: 0 };
     }
 
-    // Skip headings that live inside thinking / reasoning blocks.
-    headings = headings.filter((heading) => {
-      return !isInsideThinkingBlock(heading);
-    });
-
-    const modelIcons = getAllModelIcons();
-    const seenModels = new Set();
-
-    const rawItems = [
-      ...userMessages.map((element) => ({
-        type: 'prompt',
-        element
-      })),
-      ...headings.map((element) => ({
-        type: 'heading',
-        element
-      }))
-    ].sort(compareByDocumentOrder);
-
+    const nodes = container.querySelectorAll(OUTLINE_ITEM_SELECTOR);
+    const cardsWithIcon = new Set();
     const entries = [];
 
     let inputNumber = 0;
     let headingCount = 0;
 
-    for (const item of rawItems) {
-      if (item.type === 'prompt') {
+    for (const element of nodes) {
+      if (!isRendered(element)) continue;
+
+      if (element.matches(USER_MESSAGE_SELECTOR)) {
         inputNumber += 1;
 
-        const fullText = extractUserPrompt(item.element);
-        const fallbackText = `Input ${inputNumber}`;
+        const fullText =
+          extractUserPrompt(element) || `Input ${inputNumber}`;
 
         entries.push({
           type: 'prompt',
-          element: item.element,
+          element,
+          index: entries.length,
           inputNumber,
-          fullText: fullText || fallbackText,
-          text: shortenText(fullText || fallbackText)
+          fullText,
+          text: shortenText(fullText)
         });
 
         continue;
       }
 
-      const text = normalizeText(item.element.textContent);
+      if (isInsideThinkingBlock(element)) continue;
+
+      const text = normalizeText(element.textContent);
 
       if (!text) continue;
 
-      const level = Number.parseInt(
-        item.element.tagName.charAt(1),
-        10
-      );
+      // First heading in each model's card carries that model's icon.
+      let icon = null;
+      const card = findResponseCard(element);
 
-      let iconSrc = null;
-      let iconBg = null;
-
-      const model = findModelForHeading(
-        item.element,
-        modelIcons
-      );
-
-      if (model && !seenModels.has(model.element)) {
-        seenModels.add(model.element);
-        iconSrc = model.iconSrc;
-        iconBg = model.iconBg;
+      if (card && !cardsWithIcon.has(card)) {
+        cardsWithIcon.add(card);
+        icon = getCardIcon(card);
       }
 
       entries.push({
         type: 'heading',
-        element: item.element,
+        element,
+        index: entries.length,
         text,
-        level,
+        level: Number.parseInt(element.tagName.charAt(1), 10),
         displayLevel: 1,
-        iconSrc,
-        iconBg
+        iconSrc: icon ? icon.iconSrc : null,
+        iconBg: icon ? icon.iconBg : null,
+        iconKey: icon ? icon.iconKey : ''
       });
 
       headingCount += 1;
@@ -1551,75 +1770,271 @@
     flashTimers.set(element, timer);
   }
 
-  function navigateToElement(element) {
-    if (!element || !element.isConnected) {
-      refreshOutline();
+  function findVerticalScroller(element) {
+    const chatScroller = element.closest(CHAT_SCROLLER_SELECTOR);
+
+    if (
+      chatScroller &&
+      chatScroller.scrollHeight > chatScroller.clientHeight
+    ) {
+      return chatScroller;
+    }
+
+    let node = element.parentElement;
+
+    while (
+      node &&
+      node !== document.body &&
+      node !== document.documentElement
+    ) {
+      if (node.scrollHeight > node.clientHeight + 1) {
+        const overflowY = getComputedStyle(node).overflowY;
+
+        if (
+          overflowY === 'auto' ||
+          overflowY === 'scroll' ||
+          overflowY === 'overlay'
+        ) {
+          return node;
+        }
+      }
+
+      node = node.parentElement;
+    }
+
+    return null;
+  }
+
+  // Scroll only the chat vertically. Using scrollIntoView here would also
+  // yank the multi-model rail sideways and cut off TypingMind's own
+  // smooth slide to the selected model.
+  function scrollChatTo(element, context) {
+    const behavior = prefersReducedMotion() ? 'auto' : 'smooth';
+    const scroller = findVerticalScroller(element);
+
+    if (!scroller) {
+      element.scrollIntoView({
+        behavior,
+        block: 'start',
+        inline: 'nearest'
+      });
+
       return;
     }
 
-    element.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-      inline: 'nearest'
-    });
+    // Keep the heading clear of the sticky model tab bar (its height plus
+    // wherever it sticks, in case another extension moves it down).
+    let stickyOffset = 0;
 
-    setTimeout(() => {
-      flashElement(element);
-    }, 180);
+    if (context && context.tabBar) {
+      const stickyTop =
+        Number.parseFloat(getComputedStyle(context.tabBar).top) || 0;
+
+      stickyOffset =
+        Math.max(0, stickyTop) +
+        context.tabBar.getBoundingClientRect().height;
+    }
+
+    const scrollerRect = scroller.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+
+    const target =
+      scroller.scrollTop +
+      (elementRect.top - scrollerRect.top - scroller.clientTop) -
+      stickyOffset -
+      SCROLL_TOP_GAP;
+
+    const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+
+    scroller.scrollTo({
+      top: Math.round(Math.max(0, Math.min(target, maxScroll))),
+      behavior
+    });
   }
 
-  function makeNavigable(listItem, targetElement) {
-    listItem.tabIndex = 0;
-    listItem.setAttribute('role', 'button');
+  // No tab bar found (layout changed): at least slide the card into view.
+  function revealCard(context) {
+    const { rail, card } = context;
 
-    listItem.addEventListener('click', () => {
-      navigateToElement(targetElement);
+    if (!rail || rail.scrollWidth <= rail.clientWidth + 1) return;
+
+    const railRect = rail.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+
+    if (
+      cardRect.left >= railRect.left - 1 &&
+      cardRect.right <= railRect.right + 1
+    ) {
+      return;
+    }
+
+    const paddingLeft =
+      Number.parseFloat(getComputedStyle(rail).paddingLeft) || 0;
+
+    rail.scrollTo({
+      left: Math.max(
+        0,
+        rail.scrollLeft + (cardRect.left - railRect.left) - paddingLeft - 10
+      ),
+      behavior: prefersReducedMotion() ? 'auto' : 'smooth'
     });
+  }
 
-    listItem.addEventListener('keydown', (event) => {
-      if (
-        event.key !== 'Enter' &&
-        event.key !== ' '
-      ) {
-        return;
+  function navigateToElement(element) {
+    const token = ++navigationToken;
+    const context = getMultiModelContext(element);
+
+    let switchedTab = false;
+
+    if (context && context.tab) {
+      if (!isTabSelected(context.tab)) {
+        // Exactly what clicking the model's tab does: select it, outline
+        // its card and slide the rail to it.
+        clickingTab = true;
+
+        try {
+          context.tab.click();
+        } finally {
+          clickingTab = false;
+        }
+
+        switchedTab = true;
       }
+    } else if (context) {
+      revealCard(context);
+    }
 
-      event.preventDefault();
-      navigateToElement(targetElement);
-    });
+    const scrollToTarget = () => {
+      if (token !== navigationToken) return;
+      if (!element.isConnected) return;
+
+      scrollChatTo(element, context);
+
+      setTimeout(() => {
+        if (element.isConnected) {
+          flashElement(element);
+        }
+      }, FLASH_DELAY_MS);
+    };
+
+    if (switchedTab) {
+      // TypingMind scrolls to the end of the card on the next frame after a
+      // tab click. Wait until that has been issued, then override it.
+      requestAnimationFrame(() => requestAnimationFrame(scrollToTarget));
+    } else {
+      scrollToTarget();
+    }
+  }
+
+  // The element can be replaced by a re-render between the last refresh and
+  // the click. Find the same item in a fresh outline.
+  function findReplacementEntry(staleEntry) {
+    let best = null;
+    let bestDistance = Infinity;
+
+    for (const entry of currentEntries) {
+      if (entry.type !== staleEntry.type) continue;
+      if (!entry.element.isConnected) continue;
+
+      const sameText = entry.type === 'prompt'
+        ? entry.fullText === staleEntry.fullText
+        : entry.text === staleEntry.text;
+
+      if (!sameText) continue;
+
+      const distance = Math.abs(entry.index - staleEntry.index);
+
+      if (distance < bestDistance) {
+        best = entry;
+        bestDistance = distance;
+      }
+    }
+
+    return best;
+  }
+
+  function activateEntry(entry) {
+    if (!entry) return;
+
+    if (entry.element && entry.element.isConnected) {
+      navigateToElement(entry.element);
+      return;
+    }
+
+    refreshOutline();
+
+    const replacement = findReplacementEntry(entry);
+
+    if (replacement) {
+      navigateToElement(replacement.element);
+    }
+  }
+
+  function getItemFromEvent(event) {
+    const target = event.target;
+
+    if (!target || typeof target.closest !== 'function') return null;
+
+    const item = target.closest('.outline-item');
+
+    return item && item.__tmOutlineEntry ? item : null;
+  }
+
+  function handleListClick(event) {
+    const item = getItemFromEvent(event);
+
+    if (!item) return;
+
+    activateEntry(item.__tmOutlineEntry);
+  }
+
+  function handleListKeydown(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+
+    const item = getItemFromEvent(event);
+
+    if (!item) return;
+
+    event.preventDefault();
+    activateEntry(item.__tmOutlineEntry);
   }
 
   // ---------------------------------------------------------------------------
   // Render outline
   // ---------------------------------------------------------------------------
 
-  function buildOutlineSignature(entries) {
-    return entries.map((entry) => {
-      const elementId = getNodeId(entry.element);
+  function getEntryKey(entry) {
+    const elementId = getNodeId(entry.element);
 
-      if (entry.type === 'prompt') {
-        return `p:${elementId}:${entry.fullText}`;
-      }
-
+    if (entry.type === 'prompt') {
       return [
-        'h',
+        'p',
         elementId,
-        entry.level,
-        entry.text,
-        entry.iconSrc ? 'icon' : 'no-icon'
+        entry.inputNumber,
+        entry.fullText.slice(0, PROMPT_TITLE_LENGTH)
       ].join(':');
-    }).join('|');
+    }
+
+    return [
+      'h',
+      elementId,
+      entry.displayLevel,
+      entry.iconKey,
+      entry.text
+    ].join(':');
   }
 
   function createPromptItem(entry) {
     const item = document.createElement('li');
 
     item.className = 'outline-item outline-prompt';
-    item.title = entry.fullText.slice(0, 1000);
+    item.title = entry.fullText.slice(0, PROMPT_TITLE_LENGTH);
+    item.tabIndex = 0;
+    item.setAttribute('role', 'button');
 
     item.setAttribute(
       'aria-label',
-      `Input ${entry.inputNumber}: ${entry.fullText}`
+      `Input ${entry.inputNumber}: ${shortenText(entry.fullText, PROMPT_LABEL_LENGTH)}`
     );
 
     const text = document.createElement('span');
@@ -1629,8 +2044,6 @@
 
     item.appendChild(text);
 
-    makeNavigable(item, entry.element);
-
     return item;
   }
 
@@ -1638,13 +2051,14 @@
     const item = document.createElement('li');
 
     item.className = 'outline-item';
+    item.title = entry.text;
+    item.tabIndex = 0;
+    item.setAttribute('role', 'button');
 
     item.setAttribute(
       'data-level',
       String(entry.displayLevel)
     );
-
-    item.title = entry.text;
 
     if (entry.iconSrc) {
       const icon = document.createElement('img');
@@ -1667,9 +2081,86 @@
 
     item.appendChild(text);
 
-    makeNavigable(item, entry.element);
+    return item;
+  }
+
+  function createItem(entry, key) {
+    const item = entry.type === 'prompt'
+      ? createPromptItem(entry)
+      : createHeadingItem(entry);
+
+    item.__tmOutlineKey = key;
 
     return item;
+  }
+
+  // Patch the list in place: unchanged items stay the same DOM nodes, so
+  // the panel doesn't flicker and a tap in progress is never lost.
+  // Returns true when anything changed.
+  function renderEntries(list, entries) {
+    if (entries.length === 0) {
+      const first = list.firstElementChild;
+
+      if (
+        list.childElementCount === 1 &&
+        first.classList.contains('outline-empty')
+      ) {
+        return false;
+      }
+
+      const emptyItem = document.createElement('li');
+
+      emptyItem.className = 'outline-empty';
+      emptyItem.textContent = 'No inputs or headings found in this chat.';
+
+      list.replaceChildren(emptyItem);
+
+      return true;
+    }
+
+    const reusable = new Map();
+
+    for (const child of list.children) {
+      if (child.__tmOutlineKey) {
+        reusable.set(child.__tmOutlineKey, child);
+      }
+    }
+
+    let changed = false;
+    let index = 0;
+
+    for (const entry of entries) {
+      const key = getEntryKey(entry);
+      const current = list.children[index];
+
+      if (current && current.__tmOutlineKey === key) {
+        current.__tmOutlineEntry = entry;
+        reusable.delete(key);
+        index += 1;
+        continue;
+      }
+
+      let item = reusable.get(key);
+
+      if (item) {
+        reusable.delete(key);
+      } else {
+        item = createItem(entry, key);
+      }
+
+      item.__tmOutlineEntry = entry;
+      list.insertBefore(item, current || null);
+
+      changed = true;
+      index += 1;
+    }
+
+    while (list.children.length > index) {
+      list.lastElementChild.remove();
+      changed = true;
+    }
+
+    return changed;
   }
 
   function refreshOutline() {
@@ -1691,62 +2182,28 @@
       headingCount
     } = getOutlineData();
 
+    currentEntries = entries;
+
     const countParts = [];
 
     if (inputCount) {
-      countParts.push(`${inputCount} inputs`);
+      countParts.push(plural(inputCount, 'input'));
     }
 
     if (headingCount) {
-      countParts.push(`${headingCount} headings`);
+      countParts.push(plural(headingCount, 'heading'));
     }
 
-    countElement.textContent = countParts.join(' · ');
+    const countText = countParts.join(' · ');
 
-    const signature = buildOutlineSignature(entries);
-
-    if (
-      signature === lastOutlineSignature &&
-      list.childElementCount > 0
-    ) {
-      return;
+    if (countElement.textContent !== countText) {
+      countElement.textContent = countText;
     }
 
-    lastOutlineSignature = signature;
-
-    const previousScrollTop = panel.scrollTop;
-    const fragment = document.createDocumentFragment();
-
-    if (entries.length === 0) {
-      const emptyItem = document.createElement('li');
-
-      emptyItem.className = 'outline-empty';
-      emptyItem.textContent =
-        'No inputs or headings found in this chat.';
-
-      fragment.appendChild(emptyItem);
-    } else {
-      for (const entry of entries) {
-        if (entry.type === 'prompt') {
-          fragment.appendChild(
-            createPromptItem(entry)
-          );
-        } else {
-          fragment.appendChild(
-            createHeadingItem(entry)
-          );
-        }
-      }
+    if (renderEntries(list, entries)) {
+      // Content height changed, so re-measure the placement.
+      positionPanel();
     }
-
-    list.replaceChildren(fragment);
-
-    // Content height changed, so re-measure the placement.
-    positionPanel();
-
-    requestAnimationFrame(() => {
-      panel.scrollTop = previousScrollTop;
-    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1780,7 +2237,7 @@
       refreshPendingSince = now;
     }
 
-    // Streaming replies mutate the DOM nonstop, which used to reset the
+    // Streaming replies mutate the DOM nonstop, which would reset the
     // debounce forever. Force a refresh once the max wait is hit.
     if (now - refreshPendingSince >= REFRESH_MAX_WAIT_MS) {
       if (refreshTimer) {
@@ -1798,15 +2255,15 @@
     refreshTimer = setTimeout(runRefresh, REFRESH_DEBOUNCE_MS);
   }
 
+  // Throttled, not debounced: runs at most every 120 ms even while the DOM
+  // changes nonstop, and never more often than that.
   function scheduleVisibilityCheck() {
-    if (visibilityTimer) {
-      clearTimeout(visibilityTimer);
-    }
+    if (visibilityTimer) return;
 
     visibilityTimer = setTimeout(() => {
       visibilityTimer = null;
       updateButtonVisibility();
-    }, VISIBILITY_DEBOUNCE_MS);
+    }, VISIBILITY_THROTTLE_MS);
   }
 
   function mutationBelongsToExtension(mutation) {
@@ -1828,16 +2285,34 @@
 
   function startObserver() {
     observer = new MutationObserver((mutations) => {
-      const hasRelevantMutation = mutations.some(
-        (mutation) => {
-          return !mutationBelongsToExtension(mutation);
+      let textChanged = false;
+      let structureChanged = false;
+
+      for (const mutation of mutations) {
+        const structural = mutation.type === 'childList';
+
+        // Streamed tokens only matter while the panel is open.
+        if (!structural && !panelVisible) continue;
+
+        if (mutationBelongsToExtension(mutation)) continue;
+
+        if (structural) {
+          structureChanged = true;
+          break;
         }
-      );
 
-      if (!hasRelevantMutation) return;
+        textChanged = true;
+      }
 
-      scheduleRefresh();
-      scheduleVisibilityCheck();
+      if (!structureChanged && !textChanged) return;
+
+      if (panelVisible) {
+        scheduleRefresh();
+      }
+
+      if (structureChanged) {
+        scheduleVisibilityCheck();
+      }
     });
 
     observer.observe(document.body, {
@@ -1885,6 +2360,7 @@
   function handleOutsideClick(event) {
     if (
       !panelVisible ||
+      clickingTab ||
       window.innerWidth > 768
     ) {
       return;
@@ -1911,8 +2387,13 @@
 
     resizeFrame = requestAnimationFrame(() => {
       resizeFrame = null;
-      buttonPosition = clampPosition(buttonPosition);
-      applyButtonPosition();
+
+      // Don't fight an active drag.
+      if (dragState && dragState.moved) return;
+
+      // Re-fit the saved spot to the new window. The saved spot itself is
+      // untouched, so the button returns when the window grows back.
+      fitButtonToWindow();
       positionPanel();
     });
   }
@@ -1931,10 +2412,15 @@
       observer = null;
     }
 
+    clearHoldTimer(dragState);
+    dragState = null;
+
     if (refreshTimer) clearTimeout(refreshTimer);
     if (visibilityTimer) clearTimeout(visibilityTimer);
     if (dragFrame) cancelAnimationFrame(dragFrame);
     if (resizeFrame) cancelAnimationFrame(resizeFrame);
+
+    navigationToken += 1;
 
     document.removeEventListener('keydown', handleKeydown, true);
     document.removeEventListener('click', handleOutsideClick, true);
@@ -1957,6 +2443,8 @@
       .querySelectorAll(`#${PANEL_ID}, #${TOGGLE_ID}, #${STYLE_ID}`)
       .forEach((node) => node.remove());
 
+    currentEntries = [];
+
     if (
       window[NAMESPACE] &&
       window[NAMESPACE].version === VERSION
@@ -1970,7 +2458,10 @@
   // ---------------------------------------------------------------------------
 
   function init() {
-    buttonPosition = loadPosition();
+    if (destroyed) return;
+
+    anchor = loadAnchor();
+    buttonPosition = anchorToPosition(anchor);
 
     injectStyles();
     createToggleButton();
@@ -1995,12 +2486,14 @@
       toggle: togglePanel,
       refresh: refreshOutline,
       resetPosition,
-      getPosition: () => ({ ...buttonPosition })
+      getPosition: () => ({ ...buttonPosition }),
+      getAnchor: () => ({ ...anchor })
     };
 
     console.log(
-      `[Page Outline v${VERSION}] Loaded. Drag the button anywhere, ` +
-      'double-click it to reset, or press Ctrl/Cmd + Shift + O.'
+      `[Page Outline v${VERSION}] Loaded. Drag the button anywhere ` +
+      '(hold first on touch), double-click or double-tap it to reset, ' +
+      'or press Ctrl/Cmd + Shift + O.'
     );
   }
 
