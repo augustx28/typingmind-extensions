@@ -1,12 +1,18 @@
-// TypingMind Page Outline Extension v4.6
+// TypingMind Page Outline Extension v4.7
 // Groups response headings beneath each user input.
 // Toggle button (draggable) or Ctrl/Cmd + Shift + O.
 //
+// v4.7 changes:
+// - Clicking an input scrolls to it with no flash, so the chat bubble keeps
+//   its shape and color. Headings still flash.
+// - Switching models from the outline no longer leaves an outline around
+//   the model's card. It selects the model through the card's own name
+//   button instead of the tab.
+//
 // v4.6 changes (built on v4.3):
 // - Multi-model chats: clicking a heading or input that belongs to another
-//   model now switches TypingMind to that model's tab first, exactly as if
-//   you clicked the tab yourself, then scrolls to the heading. Headings no
-//   longer land hidden under the sticky model tab bar.
+//   model now switches TypingMind to that model first, then scrolls to the
+//   heading. Headings no longer land hidden under the sticky model tab bar.
 // - The button no longer wanders after a window resize. Its spot is saved
 //   relative to the nearest corner of the screen. Shrinking the window only
 //   pushes it inward while the window is too small; restore the window and
@@ -33,7 +39,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '4.6';
+  const VERSION = '4.7';
   const NAMESPACE = '__tmPageOutline';
 
   const PANEL_ID = 'tm-page-outline-panel';
@@ -1547,6 +1553,21 @@
     return tab.classList.contains(SELECTED_TAB_CLASS);
   }
 
+  // The model name button at the top of a card. Only trusted when it looks
+  // exactly like that button (model avatar, a name, no tooltip), so an
+  // action button such as "Set as primary" or "Delete" is never clicked.
+  function getCardTitleButton(card) {
+    const button = card.querySelector('button');
+
+    if (!button) return null;
+    if (button.hasAttribute('data-tooltip-id')) return null;
+    if (button.closest(AI_RESPONSE_SELECTOR)) return null;
+    if (!button.querySelector(MODEL_AVATAR_SELECTOR)) return null;
+    if (!normalizeText(button.textContent)) return null;
+
+    return button;
+  }
+
   // ---------------------------------------------------------------------------
   // Model icon detection
   // ---------------------------------------------------------------------------
@@ -1886,22 +1907,26 @@
 
     let switchedTab = false;
 
-    if (context && context.tab) {
-      if (!isTabSelected(context.tab)) {
-        // Exactly what clicking the model's tab does: select it, outline
-        // its card and slide the rail to it.
+    if (context && !(context.tab && isTabSelected(context.tab))) {
+      // Clicking the card's own name selects the model and slides the rail
+      // to it without the highlight outline a tab click leaves around the
+      // card. The tab is only a fallback if the name button can't be
+      // confirmed.
+      const switcher = getCardTitleButton(context.card) || context.tab;
+
+      if (switcher) {
         clickingTab = true;
 
         try {
-          context.tab.click();
+          switcher.click();
         } finally {
           clickingTab = false;
         }
 
         switchedTab = true;
+      } else {
+        revealCard(context);
       }
-    } else if (context) {
-      revealCard(context);
     }
 
     const scrollToTarget = () => {
@@ -1909,6 +1934,10 @@
       if (!element.isConnected) return;
 
       scrollChatTo(element, context);
+
+      // Only headings flash. Flashing an input squares off its bubble and
+      // hides its color, so inputs just scroll into place.
+      if (element.matches(USER_MESSAGE_SELECTOR)) return;
 
       setTimeout(() => {
         if (element.isConnected) {
