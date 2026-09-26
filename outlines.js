@@ -1,6 +1,13 @@
-// TypingMind Page Outline Extension v4.7
+// TypingMind Page Outline Extension v4.8
 // Groups response headings beneath each user input.
 // Toggle button (draggable) or Ctrl/Cmd + Shift + O.
+//
+// v4.8 changes:
+// - Model icons are round, like TypingMind's own avatars, instead of
+//   rounded squares. Dark logos no longer show white corners or a white
+//   rim: the white fill behind logo images now stops just inside the edge.
+// - Logos that TypingMind draws inside a colored circle (GPT, Claude) keep
+//   the same margin they have in TypingMind, so the circle never cuts them.
 //
 // v4.7 changes:
 // - Clicking an input scrolls to it with no flash, so the chat bubble keeps
@@ -39,7 +46,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '4.7';
+  const VERSION = '4.8';
   const NAMESPACE = '__tmPageOutline';
 
   const PANEL_ID = 'tm-page-outline-panel';
@@ -87,6 +94,7 @@
   const MIN_PANEL_HEIGHT = 140;
   const DEFAULT_PANEL_WIDTH = 270;
   const SCROLL_TOP_GAP = 10;
+  const ICON_SIZE = 16;
 
   const DEFAULT_ANCHOR = Object.freeze({
     x: 'right',
@@ -522,7 +530,9 @@
 
       /* Model icon */
 
+      /* Round, like TypingMind's own model avatars */
       #${PANEL_ID} .outline-model-icon {
+        box-sizing: border-box;
         width: 16px;
         height: 16px;
         min-width: 16px;
@@ -530,7 +540,7 @@
         max-width: 16px;
         max-height: 16px;
         flex: 0 0 16px;
-        border-radius: 4px;
+        border-radius: 50%;
         object-fit: contain;
         opacity: 0.85;
       }
@@ -1603,6 +1613,23 @@
     return dataUri;
   }
 
+  // How much empty ring TypingMind leaves around a logo drawn inside a
+  // colored circle (GPT, Claude, finalized), scaled to the outline's icon.
+  // Keeps the logo inside the circle instead of cut off by it.
+  function measureGlyphPadding(avatar, glyph) {
+    const outer = avatar.getBoundingClientRect();
+    const inner = glyph.getBoundingClientRect();
+
+    if (!outer.width || !inner.width || !inner.height) return 0;
+
+    const share = Math.min(
+      1,
+      Math.max(inner.width, inner.height) / outer.width
+    );
+
+    return Math.round((1 - share) * (ICON_SIZE / 2) * 100) / 100;
+  }
+
   // The model avatar in a card's header, as an image the panel can show.
   function getCardIcon(card) {
     const avatar = card.querySelector(MODEL_AVATAR_SELECTOR);
@@ -1623,26 +1650,32 @@
     }
 
     let iconSrc = null;
+    let iconKind = 'image';
+    let iconFit = '';
+    let iconPad = 0;
 
-    if (avatar.tagName === 'IMG' && avatar.src) {
-      iconSrc = avatar.src;
+    const image = avatar.tagName === 'IMG'
+      ? avatar
+      : avatar.querySelector('img');
+
+    if (image && image.src) {
+      iconSrc = image.src;
+
+      // Draw the logo the way TypingMind does (stretched or letterboxed).
+      iconFit = getComputedStyle(image).objectFit || '';
     } else {
-      const image = avatar.querySelector('img');
+      const svg = avatar.querySelector('svg');
 
-      if (image && image.src) {
-        iconSrc = image.src;
-      } else {
-        const svg = avatar.querySelector('svg');
-
-        if (svg) {
-          try {
-            iconSrc = getSvgDataUri(svg, computedStyle.color || '#000000');
-          } catch (error) {
-            console.debug(
-              '[Page Outline] Could not copy a model icon.',
-              error
-            );
-          }
+      if (svg) {
+        try {
+          iconSrc = getSvgDataUri(svg, computedStyle.color || '#000000');
+          iconKind = 'glyph';
+          iconPad = measureGlyphPadding(avatar, svg);
+        } catch (error) {
+          console.debug(
+            '[Page Outline] Could not copy a model icon.',
+            error
+          );
         }
       }
     }
@@ -1652,7 +1685,17 @@
     return {
       iconSrc,
       iconBg: background,
-      iconKey: `${getNodeId(avatar)}|${background}|${iconSrc.length}`
+      iconKind,
+      iconFit,
+      iconPad,
+      iconKey: [
+        getNodeId(avatar),
+        background,
+        iconSrc.length,
+        iconKind,
+        iconFit,
+        iconPad
+      ].join('|')
     };
   }
 
@@ -1750,6 +1793,9 @@
         displayLevel: 1,
         iconSrc: icon ? icon.iconSrc : null,
         iconBg: icon ? icon.iconBg : null,
+        iconKind: icon ? icon.iconKind : '',
+        iconFit: icon ? icon.iconFit : '',
+        iconPad: icon ? icon.iconPad : 0,
         iconKey: icon ? icon.iconKey : ''
       });
 
@@ -2096,7 +2142,29 @@
       icon.className = 'outline-model-icon';
       icon.alt = '';
       icon.loading = 'lazy';
-      icon.style.backgroundColor = entry.iconBg || 'white';
+
+      const background = entry.iconBg || 'white';
+
+      if (entry.iconKind === 'glyph') {
+        // A logo inside a colored circle: fill the whole circle, keep the
+        // logo's margin so the round edge never cuts it.
+        icon.style.backgroundColor = background;
+
+        if (entry.iconPad) {
+          icon.style.padding = `${entry.iconPad}px`;
+        }
+      } else {
+        // A logo image: TypingMind clips it to a circle over a white fill.
+        // The fill stops just inside the edge, so it can't show through as
+        // white corners or a white ring around dark logos.
+        icon.style.background =
+          `radial-gradient(circle closest-side, ${background} ` +
+          'calc(100% - 1px), transparent calc(100% - 0.5px))';
+
+        if (entry.iconFit) {
+          icon.style.objectFit = entry.iconFit;
+        }
+      }
 
       icon.addEventListener('error', () => {
         icon.remove();
