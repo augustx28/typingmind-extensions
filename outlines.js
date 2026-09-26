@@ -8,6 +8,11 @@
 //   rim: the white fill behind logo images now stops just inside the edge.
 // - Logos that TypingMind draws inside a colored circle (GPT, Claude) keep
 //   the same margin they have in TypingMind, so the circle never cuts them.
+// - Logo images are stretched or letterboxed exactly as TypingMind draws
+//   them, so a logo that isn't square no longer gets white bars.
+// - Icons are a little bigger (20px, was 16px), every model's icon is the
+//   same size, and each one sits centered on its heading's first line
+//   without making the row taller.
 //
 // v4.7 changes:
 // - Clicking an input scrolls to it with no flash, so the chat bubble keeps
@@ -94,7 +99,7 @@
   const MIN_PANEL_HEIGHT = 140;
   const DEFAULT_PANEL_WIDTH = 270;
   const SCROLL_TOP_GAP = 10;
-  const ICON_SIZE = 16;
+  const ICON_SIZE = 20;
 
   const DEFAULT_ANCHOR = Object.freeze({
     x: 'right',
@@ -528,18 +533,19 @@
         color: #777;
       }
 
-      /* Model icon */
+      /* Model icon: round, like TypingMind's own model avatars. Centered on
+         the heading's first line, without making the row any taller. */
 
-      /* Round, like TypingMind's own model avatars */
       #${PANEL_ID} .outline-model-icon {
         box-sizing: border-box;
-        width: 16px;
-        height: 16px;
-        min-width: 16px;
-        min-height: 16px;
-        max-width: 16px;
-        max-height: 16px;
-        flex: 0 0 16px;
+        width: ${ICON_SIZE}px;
+        height: ${ICON_SIZE}px;
+        min-width: ${ICON_SIZE}px;
+        min-height: ${ICON_SIZE}px;
+        max-width: ${ICON_SIZE}px;
+        max-height: ${ICON_SIZE}px;
+        flex: 0 0 ${ICON_SIZE}px;
+        margin: calc((1.35em - ${ICON_SIZE}px) / 2) 0;
         border-radius: 50%;
         object-fit: contain;
         opacity: 0.85;
