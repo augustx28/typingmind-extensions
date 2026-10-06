@@ -1,12 +1,13 @@
-/* TypingMind: adjustable dark-mode AI response colors.
+/* TypingMind: adjustable AI response colors.
  * Edit the COLORS settings below, then save and refresh TypingMind.
  * An empty string ('') leaves that color setting unchanged.
  * Uses the same prose color variables as the original working script.
  *
+ * Response text colors apply in dark mode.
  * Thinking area: the thinking text, tool-call rows (like "Parallel Web
  * search ...") and the "Worked for 6s" label. They get regular (non-italic)
- * text in every theme, plus their own dimmed colors in dark mode. The
- * thinking settings never touch your normal response text.
+ * text plus warm gray colors in both dark and light mode. The thinking
+ * settings never touch your normal response text.
  *
  * Disable this script and refresh to restore the original styling.
  */
@@ -15,18 +16,24 @@
 
   // EDIT COLORS HERE. Example: bold: '#eeeae5'
   const COLORS = {
-    // Normal response text
-    body: '#dedbd7',          // Regular response text: warm light gray
-    bold: '#dedbd7',          // Bold text
-    headings: '#dedbd7',      // Shared heading color, including table headers
-    bullets: '#dedbd7',       // Bullet dots only, not the text beside them
-    numbers: '#dedbd7',       // Automatic list numbers only, not typed numbers
+    // Normal response text (dark mode)
+    body: '#dedbd7',           // Regular response text: warm light gray
+    bold: '#dedbd7',           // Bold text
+    headings: '#dedbd7',       // Shared heading color, including table headers
+    bullets: '#dedbd7',        // Bullet dots only, not the text beside them
+    numbers: '#dedbd7',        // Automatic list numbers only, not typed numbers
 
-    // Thinking area only
-    thinkingText: '#9a9894',  // Same warm tint as the body text, just dimmer
-    thinkingBorder: '#62605d' // Thinking block left border: quiet warm gray
+    // Thinking area, dark mode
+    thinkingText: '#9a9894',   // Same warm tint as the body text, just dimmer
+    thinkingHover: '#cdcac6',  // "Worked for" label under the mouse
+    thinkingBorder: '#62605d', // Thinking block left border
+
+    // Thinking area, light mode
+    lightThinkingText: '#6b6865',   // Warm gray, lighter than the answer text
+    lightThinkingHover: '#2f2d2b',  // "Worked for" label under the mouse
+    lightThinkingBorder: '#dad7d3'  // Thinking block left border
   };
-  // Other thinkingText options: brighter '#a7a4a0', dimmer '#918f8c', pure gray '#999999'
+  // Other dark thinkingText options: brighter '#a7a4a0', dimmer '#918f8c', pure gray '#999999'
 
   const STYLE_ID = 'tm-warm-gray-response-text';
   const HEX_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
@@ -78,6 +85,23 @@
     '--tw-prose-code'
   ];
 
+  // Light rules skip anything inside .dark and dark rules need it, so the
+  // two never overlap, wherever TypingMind puts its .dark class.
+  const THEMES = [
+    {
+      scope: (selector) => `${selector}:not(.dark *)`,
+      text: 'lightThinkingText',
+      hover: 'lightThinkingHover',
+      border: 'lightThinkingBorder'
+    },
+    {
+      scope: (selector) => `.dark ${selector}`,
+      text: 'thinkingText',
+      hover: 'thinkingHover',
+      border: 'thinkingBorder'
+    }
+  ];
+
   function color(key) {
     const value = COLORS[key];
     return typeof value === 'string' && HEX_COLOR.test(value.trim())
@@ -89,9 +113,40 @@
     return `${selectors.join(',\n')} {\n  ${declarations.join('\n  ')}\n}`;
   }
 
-  // Dark mode only, matching how the response colors work
-  function dark(selector) {
-    return `.dark ${selector}`;
+  function themeRules(theme) {
+    const rules = [];
+    const text = color(theme.text);
+    const hover = color(theme.hover);
+    const border = color(theme.border);
+    const scope = theme.scope;
+
+    if (text) {
+      rules.push(rule([scope(THINKING)], [
+        `color: ${text} !important;`,
+        ...THINKING_VARIABLES.map((variable) => `${variable}: ${text} !important;`)
+      ]));
+
+      // Tool calls and the label, including their icons and inner spans
+      rules.push(rule(
+        [LABEL, ...TOOL_BLOCKS].flatMap((s) => [scope(s), scope(`${s} *`)]),
+        [`color: ${text} !important;`]
+      ));
+      rules.push(rule([scope(TOOL_ROW), scope(`${TOOL_ROW} *`)], [`color: ${text} !important;`]));
+    }
+
+    if (hover) {
+      // Mouse hover only, so a tap on the phone doesn't leave it lit up
+      rules.push(`@media (hover: hover) {\n${rule(
+        [scope(`${LABEL}:hover`), scope(`${LABEL}:hover *`)],
+        [`color: ${hover} !important;`]
+      )}\n}`);
+    }
+
+    if (border) {
+      rules.push(rule([scope(THINKING)], [`border-left-color: ${border} !important;`]));
+    }
+
+    return rules;
   }
 
   function buildCss() {
@@ -114,26 +169,7 @@
       rules.push(rule(['[data-element-id="ai-response"].prose'], responseDeclarations));
     }
 
-    const text = color('thinkingText');
-    const border = color('thinkingBorder');
-
-    if (text) {
-      rules.push(rule([dark(THINKING)], [
-        `color: ${text} !important;`,
-        ...THINKING_VARIABLES.map((variable) => `${variable}: ${text} !important;`)
-      ]));
-
-      // Tool calls and the label, including their icons and inner spans
-      rules.push(rule(
-        [LABEL, ...TOOL_BLOCKS].flatMap((s) => [dark(s), dark(`${s} *`)]),
-        [`color: ${text} !important;`]
-      ));
-      rules.push(rule([dark(TOOL_ROW), dark(`${TOOL_ROW} *`)], [`color: ${text} !important;`]));
-    }
-
-    if (border) {
-      rules.push(rule([dark(THINKING)], [`border-left-color: ${border} !important;`]));
-    }
+    THEMES.forEach((theme) => rules.push(...themeRules(theme)));
 
     return rules.join('\n\n');
   }
