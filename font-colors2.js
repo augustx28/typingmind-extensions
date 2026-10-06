@@ -5,14 +5,19 @@
  *
  * Response text colors apply in dark mode.
  * Thinking area: the thinking text, tool-call rows (like "Parallel Web
- * search ...") and the "Worked for 6s" label. They get regular (non-italic)
- * text plus warm gray colors in both dark and light mode. The thinking
- * settings never touch your normal response text.
+ * search ...") and the "Worked for 6s" label get regular (non-italic) text
+ * and warm gray colors in dark and light mode. TypingMind's own effects are
+ * left alone: the label keeps its moving shimmer while it's working and its
+ * hover effect once it's done. The thinking settings never touch your normal
+ * response text.
  *
+ * Check which version is running: type tmFontColorsVersion in the console.
  * Disable this script and refresh to restore the original styling.
  */
 (() => {
   'use strict';
+
+  const VERSION = 5;
 
   // EDIT COLORS HERE. Example: bold: '#eeeae5'
   const COLORS = {
@@ -25,13 +30,11 @@
 
     // Thinking area, dark mode
     thinkingText: '#9a9894',   // Same warm tint as the body text, just dimmer
-    thinkingHover: '#cdcac6',  // "Worked for" label under the mouse
     thinkingBorder: '#62605d', // Thinking block left border
 
     // Thinking area, light mode
-    lightThinkingText: '#6b6865',   // Warm gray, lighter than the answer text
-    lightThinkingHover: '#2f2d2b',  // "Worked for" label under the mouse
-    lightThinkingBorder: '#dad7d3'  // Thinking block left border
+    lightThinkingText: '#6b6865',  // Warm gray, lighter than the answer text
+    lightThinkingBorder: '#dad7d3' // Thinking block left border
   };
   // Other dark thinkingText options: brighter '#a7a4a0', dimmer '#918f8c', pure gray '#999999'
 
@@ -49,11 +52,16 @@
 
   /* ---------------- Thinking area selectors ---------------- */
 
-  // Thinking text. Its color is hard-coded with a Tailwind class, so it
-  // needs a direct override instead of the prose variables above.
+  // Thinking area colors use extra-specific selectors instead of !important,
+  // so they beat TypingMind's color classes but never its animations.
+  // (A doubled attribute selector matches the same element, it just ranks
+  // higher.)
+  const twice = (selector) => selector + selector;
+
+  // Thinking text
   const THINKING = '[data-element-id="thinking-block"]';
 
-  // Tool-call containers that TypingMind tags with their own ids.
+  // Tool-call containers that TypingMind tags with their own ids
   const TOOL_BLOCKS = [
     '[data-element-id="websearch-calls-block"]',
     '[data-element-id="provider-tool-call-block"]'
@@ -66,10 +74,15 @@
     ':not([data-element-id="citations-block"] *)';
 
   // "Worked for 6s" / "Thought for 12s" toggle. It has no id or class to
-  // hook, so the script finds it by its label text and tags it.
+  // hook, so the script finds it by its label text and tags it "live" while
+  // it's still working or animating, and "done" once it's finished. Only a
+  // done label that isn't under the mouse gets recolored, so TypingMind's
+  // shimmer and hover effects play exactly as before.
   const LABEL_ATTR = 'data-tm-thinking-label';
   const LABEL = `[${LABEL_ATTR}]`;
+  const DONE_LABEL = `[${LABEL_ATTR}="done"]:not(:hover)`;
   const LABEL_TEXT = /^(worked|working|thought|thinking|reasoned|reasoning)\b/i;
+  const LIVE_TEXT = /^(working|thinking|reasoning)\b/i;
   const CHAT_PANE = '[data-element-id="chat-space-middle-part"]';
   const RESPONSE_BLOCK = '[data-element-id="response-block"]';
 
@@ -91,13 +104,11 @@
     {
       scope: (selector) => `${selector}:not(.dark *)`,
       text: 'lightThinkingText',
-      hover: 'lightThinkingHover',
       border: 'lightThinkingBorder'
     },
     {
       scope: (selector) => `.dark ${selector}`,
       text: 'thinkingText',
-      hover: 'thinkingHover',
       border: 'thinkingBorder'
     }
   ];
@@ -116,34 +127,28 @@
   function themeRules(theme) {
     const rules = [];
     const text = color(theme.text);
-    const hover = color(theme.hover);
     const border = color(theme.border);
     const scope = theme.scope;
 
     if (text) {
-      rules.push(rule([scope(THINKING)], [
-        `color: ${text} !important;`,
-        ...THINKING_VARIABLES.map((variable) => `${variable}: ${text} !important;`)
+      rules.push(rule([scope(twice(THINKING))], [
+        `color: ${text};`,
+        ...THINKING_VARIABLES.map((variable) => `${variable}: ${text};`)
       ]));
 
-      // Tool calls and the label, including their icons and inner spans
+      // Containers only: their text inherits the color, and anything inside
+      // with its own effect (shimmer, hover) keeps it. Icons get it directly.
       rules.push(rule(
-        [LABEL, ...TOOL_BLOCKS].flatMap((s) => [scope(s), scope(`${s} *`)]),
-        [`color: ${text} !important;`]
+        [...TOOL_BLOCKS.map(twice), DONE_LABEL].flatMap((s) => [scope(s), scope(`${s} svg`)]),
+        [`color: ${text};`]
       ));
-      rules.push(rule([scope(TOOL_ROW), scope(`${TOOL_ROW} *`)], [`color: ${text} !important;`]));
-    }
 
-    if (hover) {
-      // Mouse hover only, so a tap on the phone doesn't leave it lit up
-      rules.push(`@media (hover: hover) {\n${rule(
-        [scope(`${LABEL}:hover`), scope(`${LABEL}:hover *`)],
-        [`color: ${hover} !important;`]
-      )}\n}`);
+      // Own rule: a browser without :has() then drops only this one
+      rules.push(rule([scope(TOOL_ROW), scope(`${TOOL_ROW} svg`)], [`color: ${text};`]));
     }
 
     if (border) {
-      rules.push(rule([scope(THINKING)], [`border-left-color: ${border} !important;`]));
+      rules.push(rule([scope(twice(THINKING))], [`border-left-color: ${border};`]));
     }
 
     return rules;
@@ -191,25 +196,48 @@
     return toggle && !tooBig ? toggle : span;
   }
 
+  // Live = still working ("Working for 3s") or running a CSS animation such
+  // as the shimmer. Hover fades are transitions, not animations, so they
+  // don't count.
+  function isLive(target, span) {
+    if (LIVE_TEXT.test((span.textContent || '').trim())) return true;
+    if (typeof target.getAnimations !== 'function' || typeof CSSAnimation === 'undefined') {
+      return false;
+    }
+    return target.getAnimations({ subtree: true })
+      .some((animation) => animation instanceof CSSAnimation);
+  }
+
+  let liveTimer = 0;
+
   function markLabels() {
     const panes = document.querySelectorAll(CHAT_PANE);
     const roots = panes.length ? panes : document.querySelectorAll(RESPONSE_BLOCK);
+    let anyLive = false;
 
     roots.forEach((root) => {
-      const labels = new Set();
+      const labels = new Map();
 
       root.querySelectorAll('span.truncate').forEach((span) => {
-        if (isLabel(span)) labels.add(labelTarget(span));
+        if (!isLabel(span)) return;
+        const target = labelTarget(span);
+        labels.set(target, isLive(target, span) ? 'live' : 'done');
       });
 
       root.querySelectorAll(LABEL).forEach((el) => {
         if (!labels.has(el)) el.removeAttribute(LABEL_ATTR);
       });
 
-      labels.forEach((el) => {
-        if (!el.hasAttribute(LABEL_ATTR)) el.setAttribute(LABEL_ATTR, '');
+      labels.forEach((state, el) => {
+        if (state === 'live') anyLive = true;
+        if (el.getAttribute(LABEL_ATTR) !== state) el.setAttribute(LABEL_ATTR, state);
       });
     });
+
+    // A label can stop animating without any DOM change to notice, so
+    // re-check once a second, only while one is still live.
+    clearTimeout(liveTimer);
+    liveTimer = anyLive ? setTimeout(markLabels, 1000) : 0;
   }
 
   let markTimer = 0;
@@ -245,6 +273,7 @@
     }
 
     style.textContent = buildCss();
+    window.tmFontColorsVersion = VERSION;
     watchLabels();
   }
 
