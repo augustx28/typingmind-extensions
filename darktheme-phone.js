@@ -11,7 +11,7 @@
   const THEME_ID = 'custom-dark-theme-only-v2';
 
   const COLOR = '#161616';
-  const BORDER_COLOR = 'rgba(54, 55, 57, 0.6)';
+  const BORDER_COLOR = 'rgba(54, 55, 57, 0.3)';
 
   /* ===========================================================
      BLOCK 1 - MENU / WORKSPACE TWEAKS
