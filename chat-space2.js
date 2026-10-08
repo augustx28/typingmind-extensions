@@ -1,13 +1,13 @@
 /* =====================================================================
- * TypingMind - Space Saver  v4.4
+ * TypingMind - Space Saver  v4.5
  * ---------------------------------------------------------------------
  * One control that minimizes the chat furniture, and leaves it that way.
  *
  *   Tap the chevron above the message box and the header, the model /
  *   Thinking / reasoning row and the message box itself all collapse.
- *   The chat gets the whole screen, with only the chevron left in a
- *   slim strip at the bottom. Tap it again and everything comes back.
- *   Nothing moves on its own while you read.
+ *   The chat gets the whole screen, top to bottom, with only the chevron
+ *   left, floating just above the bottom edge. Tap it again and
+ *   everything comes back. Nothing moves on its own while you read.
  *
  *   Getting back to typing:
  *     - tap the chevron, or press Alt+Shift+H (Option+Shift+H on Mac)
@@ -41,7 +41,16 @@
  *     detection and no delay anywhere in the chat area.
  *   - Collapsing happens by removing things from the layout, never by
  *     floating them over the chat, so nothing can overlap or misalign.
- *     The chevron's strip is part of the layout too, never an overlay.
+ *     The one exception is the chevron when everything is minimized: it
+ *     floats over the faded end of the chat, so the chat can use the
+ *     whole screen.
+ *   - Nothing animates its position. The chevron is pinned with CSS, the
+ *     footer's own animation is switched off, and every change lands in
+ *     a single frame. While you scroll, nothing moves but the chat.
+ *   - The extension never scrolls the chat by itself. The only scroll
+ *     change it makes is the one that keeps your words in place at the
+ *     moment you tap, and it also takes over a delayed spacer resize of
+ *     TypingMind's that used to shift the chat half a second later.
  *   - The layout only changes when you tap, type, press Edit or open a
  *     different chat. Never while you read.
  *
@@ -59,7 +68,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '4.4.0';
+  const VERSION = '4.5.0';
   const STORE_KEY = 'tm-space-saver:v2';
   const LEGACY_KEYS = ['tm-space-saver:v1'];
   const CHATS_KEY = 'tm-space-saver:chats';
@@ -110,7 +119,9 @@
     tabW: 30,
     tabH: 22,
     tabGap: 8,            // clear space between the chip and the message box
-    stripGap: 5,          // space above and below the chip when the box is minimized
+    floatGap: 8,          // fully minimized: chip's distance from the bottom edge
+    floatFade: 44,        // fully minimized: height of the fade under the chip
+    floatClear: 44,       // fully minimized: extra room after the last message
     entryMs: 3000,        // after opening a chat, how long to watch for it being new
     emptyMs: 300,         // how long a chat must stay empty to count as new
     entryStepMs: 100,
@@ -322,16 +333,24 @@ html.tss-models.tss-hide [data-tss-row] {
 
 /* ---------- Minimized: the message box and everything around it ----------
    Attachments, conversation starters, the box and its tools all leave
-   the layout. Only the chevron stays, in a slim strip at the bottom.
-   The model row follows its own option above. */
+   the layout, and the footer that held them shrinks to nothing, so the
+   chat runs to the bottom of the screen. The model row follows its own
+   option above. On a phone with a home bar the footer keeps exactly the
+   system's safe area and nothing more. */
 
 html.tss-box.tss-hide [data-tss-footer] {
-  padding-top: ${T.stripGap}px !important;
-  padding-bottom: max(${T.stripGap}px, env(safe-area-inset-bottom, 0px)) !important;
+  padding-top: 0 !important;
+  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
 }
 
 html.tss-box.tss-hide [data-tss-footer] > :not(.tss-tab):not([data-tss-row]) {
   display: none !important;
+}
+
+/* The end of the chat clears the floating chevron, so the last line of
+   a reply never ends up under it. */
+html.tss-box.tss-hide [data-tss-pane] > [data-element-id="scroll-padding"] {
+  margin-top: ${T.floatClear}px !important;
 }
 
 /* ---------- Minimized with the box kept: its tools fold away ---------- */
@@ -344,7 +363,8 @@ html.tss-tools.tss-fold [data-tss-end] [data-element-id="chat-input-actions"] {
    This fades the chat's own pixels with a mask. It paints nothing, so
    it cannot be the wrong color and it cannot show a band at the sides. */
 
-html.tss-fade [data-tss-pane] {
+html.tss-fade [data-tss-pane],
+html.tss-box.tss-hide [data-tss-pane] {
   --tss-fade: 30px;
   -webkit-mask-image:
     linear-gradient(to bottom, #000 calc(100% - var(--tss-fade)), transparent 100%);
@@ -356,6 +376,19 @@ html.tss-fade [data-tss-pane] {
 
 html.tss-fade.tss-phone [data-tss-pane] {
   --tss-fade: 22px;
+}
+
+/* Fully minimized, the chevron floats over the end of the chat, so the
+   fade is always there and shaped to sit under it. */
+html.tss-box.tss-hide [data-tss-pane] {
+  -webkit-mask-image: linear-gradient(to bottom,
+    #000 calc(100% - ${T.floatFade}px),
+    rgba(0, 0, 0, .35) calc(100% - 26px),
+    transparent calc(100% - 6px));
+  mask-image: linear-gradient(to bottom,
+    #000 calc(100% - ${T.floatFade}px),
+    rgba(0, 0, 0, .35) calc(100% - 26px),
+    transparent calc(100% - 6px));
 }
 
 /* ---------- Tighter spacing ----------
@@ -388,10 +421,15 @@ html.tss-dense.tss-phone [data-element-id="chat-space-beginning-part"] {
 /* ---------- The chevron ----------
    A small chip centred just above the message box. Its tint and its
    ring are made from the app's own text color, so it reads correctly
-   on any theme without a single line of color code. */
+   on any theme without a single line of color code.
+
+   It never animates its position or size. TypingMind animates the
+   footer it lives in, so that animation is switched off too: every
+   change lands in one frame and nothing slides afterwards. */
 
 html.tss-ready [data-tss-footer] {
   position: relative;
+  transition: none !important;
 }
 
 .tss-tab {
@@ -406,7 +444,7 @@ html.tss-ready [data-tss-footer] {
   display: flex;
   align-items: center;
   justify-content: center;
-  transform: translateX(var(--tss-shift, -50%)) scale(var(--tss-scale, 1));
+  transform: translateX(-50%);
   border-radius: 999px;
   background: rgba(128, 128, 128, .10);
   box-shadow: inset 0 0 0 1px rgba(128, 128, 128, .15);
@@ -416,19 +454,17 @@ html.tss-ready [data-tss-footer] {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
-  transition: background .15s ease, box-shadow .15s ease, transform .12s ease;
+  transition: background .15s ease, box-shadow .15s ease;
 }
 
-/* Box minimized: the chip is the only thing left in the footer, sitting
-   in its normal flow. The strip it makes is part of the layout, so it
-   can never cover the chat, and the footer's padding keeps the phone's
-   safe area clear. */
+/* Fully minimized: the chevron floats just above the bottom of the
+   screen (or just above the model row, if that stays), over the faded
+   end of the chat. CSS alone anchors it to the footer, so nothing
+   recalculates it and it can't drift while you scroll. */
 html.tss-box.tss-hide .tss-tab {
-  position: relative;
   top: auto;
-  left: auto;
-  margin: 0 auto;
-  --tss-shift: 0px;
+  bottom: calc(100% + ${T.floatGap}px);
+  left: 50%;
 }
 
 @supports (color: color-mix(in srgb, red, blue)) {
@@ -445,6 +481,12 @@ html.tss-box.tss-hide .tss-tab {
   inset: -9px -8px;
 }
 
+/* At the bottom edge the target stops short of the edge, so it can never
+   push the page past the bottom of the screen and make it scrollable. */
+html.tss-box.tss-hide .tss-tab::after {
+  inset: -9px -8px -${T.floatGap - 2}px;
+}
+
 .tss-tab::before {
   content: "";
   display: block;
@@ -455,7 +497,7 @@ html.tss-box.tss-hide .tss-tab {
   border-bottom: 1.75px solid currentColor;
   opacity: .5;
   transform: translateY(2px) rotate(-135deg);
-  transition: transform .2s cubic-bezier(.2, .8, .2, 1), opacity .15s ease;
+  transition: opacity .15s ease;
 }
 
 /* Box kept: the chevron points down while minimized, "bring it all back" */
@@ -490,8 +532,15 @@ html.tss-box.tss-hide .tss-tab::before {
   }
 }
 
+/* Pressed: a little brighter, never smaller or moved */
 .tss-tab.tss-press {
-  --tss-scale: .92;
+  background: rgba(128, 128, 128, .2);
+}
+
+@supports (color: color-mix(in srgb, red, blue)) {
+  .tss-tab.tss-press {
+    background: color-mix(in srgb, currentColor 16%, transparent);
+  }
 }
 
 .tss-tab.tss-press::before {
@@ -1304,6 +1353,37 @@ html.tss-box.tss-hide .tss-tab::before {
     }
   }
 
+  /* TypingMind keeps an empty spacer under the last message, sized from
+   * the chat area's height, so a short reply can scroll up to the top. It
+   * re-sizes that spacer half a second after the chat area changes size,
+   * and if you are near the end of the chat that late re-size shifts the
+   * text on its own. That was the "auto scroll" after a toggle. Here the
+   * same re-size happens in the same frame as the toggle instead.
+   * It only runs while TypingMind's spacer still matches this formula, so
+   * if they ever change theirs, this quietly steps aside. */
+  function spacerFor(paneH) {
+    const items = document.querySelectorAll('.dynamic-chat-content-container > *');
+    if (!items.length) return 1;
+    const post = document.querySelector('.post-message-content');
+    const postH = post ? post.offsetHeight : 0;
+    const last = items[items.length - 1];
+    const lastH = last ? last.offsetHeight : 0;
+    return Math.max(1, Math.min(paneH - postH - lastH - 100, window.innerHeight));
+  }
+
+  function spacerInSync(p) {
+    let sp = null;
+    try {
+      sp = p.querySelector(':scope > [data-element-id="scroll-padding"]');
+    } catch (e) {
+      return null;
+    }
+    if (!sp) return null;
+    const raw = sp.style.paddingBottom;
+    if (!/^\d+(\.\d+)?px$/.test(raw)) return null;
+    return Math.abs(parseFloat(raw) - spacerFor(p.clientHeight)) <= 1 ? sp : null;
+  }
+
   /* Collapsing the header changes where the chat pane starts. Measure the
    * pane before and after the class flips and move the scroll position by
    * the same amount, so the words you are reading stay exactly where they
@@ -1318,9 +1398,17 @@ html.tss-box.tss-hide .tss-tab::before {
 
     const p = parts.pane && parts.pane.isConnected ? parts.pane : null;
     const before = p ? p.getBoundingClientRect().top : null;
+    const spacer = p ? spacerInSync(p) : null;
 
     hidden = v;
     setClass('tss-hide', v);
+
+    // Resize TypingMind's spacer now, in this frame, instead of letting
+    // TypingMind do it half a second later and shift the chat on its own.
+    if (spacer) {
+      const next = spacerFor(p.clientHeight) + 'px';
+      if (spacer.style.paddingBottom !== next) spacer.style.paddingBottom = next;
+    }
 
     if (p && before !== null) {
       const delta = before - p.getBoundingClientRect().top;
@@ -1337,7 +1425,7 @@ html.tss-box.tss-hide .tss-tab::before {
     updateTabLabel();
 
     // Coming back: put the chevron above the box in this same frame, so
-    // it never shows for a frame where the strip used to be.
+    // it never shows for a frame at the bottom edge where it used to be.
     if (!v) placeTab();
     else schedulePlaceTab();
   }
@@ -1714,8 +1802,8 @@ html.tss-box.tss-hide .tss-tab::before {
 
   /* =================================================================
    * Chevron placement: centred on the message box, just above it. When
-   * the box is minimized the chevron sits in the footer's own flow
-   * instead, and needs no placing at all.
+   * the box is minimized, CSS pins the chevron to the bottom edge
+   * instead, and nothing here touches it.
    * =================================================================*/
 
   function schedulePlaceTab() {
@@ -1745,16 +1833,18 @@ html.tss-box.tss-hide .tss-tab::before {
     const originY = fr.top + f.clientTop;
 
     let top = -T.tabRise;
-    let left = Math.round(f.clientWidth / 2);
+    let left = f.clientWidth / 2;
 
     const er = end && end.isConnected ? end.getBoundingClientRect() : null;
     if (er && er.width) {
       top = er.top - originY - T.tabRise;
-      left = Math.round(er.left - originX + er.width / 2);
+      left = er.left - originX + er.width / 2;
     }
 
-    setTabVar('--tss-top', Math.round(top) + 'px');
-    setTabVar('--tss-left', left + 'px');
+    // Exact values, never rounded: rounding can flip a pixel back and
+    // forth on screens with fractional scaling.
+    setTabVar('--tss-top', top.toFixed(2) + 'px');
+    setTabVar('--tss-left', left.toFixed(2) + 'px');
   }
 
   /* =================================================================
@@ -1869,6 +1959,18 @@ html.tss-box.tss-hide .tss-tab::before {
     // click on something else.
     b.addEventListener('touchend', (e) => {
       if (e.cancelable) e.preventDefault();
+    }, { passive: false });
+
+    // The chevron sits over the chat. A mouse wheel over it scrolls the
+    // chat, exactly as if the chevron were not there.
+    b.addEventListener('wheel', (e) => {
+      const p = parts.pane;
+      if (!p || e.ctrlKey || !e.deltaY) return;
+      const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? p.clientHeight : 1;
+      e.preventDefault();
+      lastWheel = now();
+      gestureDir = Math.sign(e.deltaY);
+      p.scrollBy(0, e.deltaY * unit);
     }, { passive: false });
 
     b.addEventListener('pointercancel', () => {
