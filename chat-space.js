@@ -1,27 +1,37 @@
 /* =====================================================================
- * TypingMind - Space Saver  v4.3
+ * TypingMind - Space Saver  v4.5.1
  * ---------------------------------------------------------------------
  * One control that minimizes the chat furniture, and leaves it that way.
  *
  *   Tap the chevron above the message box and the header, the model /
- *   Thinking / reasoning row and the input tools all collapse. Tap it
- *   again and they all come back. Nothing moves on its own: no
- *   scroll-hiding, no timers, no surprises while you read.
+ *   Thinking / reasoning row and the message box itself all collapse.
+ *   The chat gets the whole screen, top to bottom, with only the chevron
+ *   left, floating just above the bottom edge. Tap it again and
+ *   everything comes back. Nothing moves on its own while you read.
+ *
+ *   Getting back to typing:
+ *     - tap the chevron, or press Alt+Shift+H (Option+Shift+H on Mac)
+ *     - on a computer, just start typing: the box comes back and the
+ *       first letter lands in it
+ *     - tap Edit on one of your messages and the box comes back for it
+ *     - a new, empty chat always opens with the box showing
  *
  *   Every chat remembers how you left it. Minimize chat A, open chat B,
  *   come back to A and it is still minimized, even after a reload.
  *   A chat you have never toggled keeps whatever you are looking at
  *   when you open it, so switching never makes the layout jump.
  *
+ *   Prefer the old behavior, where the box stays and only its tools
+ *   fold away? Turn off "Also minimize the message box" in the options.
+ *
  *   Auto-hide is still available in the options for anyone who wants
- *   the header to duck away as they scroll, but it is off by default.
+ *   things to duck away as they scroll, but it is off by default.
  *
  *   Extras, all optional:
  *     - a soft fade where the chat meets the message box
  *     - tighter spacing around the header and input
  *
  *   Hold the chevron (or right-click it) for options.
- *   Alt+Shift+H, Option+Shift+H on Mac, does the same as a tap.
  *
  * Design rules this version follows:
  *   - Nothing paints a background over the chat. The chevron's chip and
@@ -29,10 +39,20 @@
  *     and from transparency, so every theme (light, dark, system,
  *     custom) is correct the instant it changes, with no color
  *     detection and no delay anywhere in the chat area.
- *   - The chevron never moves. It is centred on the message box and
- *     straddles its top edge.
  *   - Collapsing happens by removing things from the layout, never by
  *     floating them over the chat, so nothing can overlap or misalign.
+ *     The one exception is the chevron when everything is minimized: it
+ *     floats over the faded end of the chat, so the chat can use the
+ *     whole screen.
+ *   - Nothing animates its position. The chevron is pinned with CSS, the
+ *     footer's own animation is switched off, and every change lands in
+ *     a single frame. While you scroll, nothing moves but the chat.
+ *   - The extension never scrolls the chat by itself. The only scroll
+ *     change it makes is the one that keeps your words in place at the
+ *     moment you tap, and it also takes over a delayed spacer resize of
+ *     TypingMind's that used to shift the chat half a second later.
+ *   - The layout only changes when you tap, type, press Edit or open a
+ *     different chat. Never while you read.
  *
  * Install: TypingMind -> Settings -> Advanced Settings -> Extensions ->
  *          paste the URL of this file -> Install -> restart the app.
@@ -48,7 +68,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '4.3.0';
+  const VERSION = '4.5.1';
   const STORE_KEY = 'tm-space-saver:v2';
   const LEGACY_KEYS = ['tm-space-saver:v1'];
   const CHATS_KEY = 'tm-space-saver:chats';
@@ -80,27 +100,41 @@
     input: '[data-element-id="message-input"]',
     textbox: '#chat-input-textbox',
     actions: '[data-element-id="chat-input-actions"]',
+    // A chat containing any of these has something to read
+    message: [
+      '[data-element-id="user-message"]',
+      '[data-element-id="ai-response"]',
+      '[data-element-id="response-block"]',
+    ].join(','),
+    editButton: '[data-element-id="edit-message-button"]',
+    editLabel: '[data-element-id="edit-message-label"]',
   };
 
   const T = {
-    hideAfter: 40,        // auto-hide mode: px of scroll before the header ducks
+    hideAfter: 40,        // auto-hide mode: px of scroll before things duck away
     holdPx: 120,          // auto-hide mode: scroll to ignore after a manual tap
     pollMs: 800,
     longPressMs: 450,
     outsideQuietMs: 600,  // auto-hide mode: quiet window after tapping a control
-    tabW: 30,
+    tabW: 22,             // same as the height, so the chip is a circle
     tabH: 22,
     tabGap: 8,            // clear space between the chip and the message box
+    floatGap: 8,          // fully minimized: chip's distance from the bottom edge
+    floatFade: 44,        // fully minimized: height of the fade under the chip
+    floatClear: 44,       // fully minimized: extra room after the last message
+    entryMs: 3000,        // after opening a chat, how long to watch for it being new
+    emptyMs: 300,         // how long a chat must stay empty to count as new
+    entryStepMs: 100,
   };
 
   // The chip's whole height plus the gap, so it never touches the box
   T.tabRise = T.tabH + T.tabGap;
 
   const MODES = ['manual', 'auto', 'off'];
-  const DEFAULTS = { mode: 'manual', models: true, tools: true, fade: true, dense: true };
+  const DEFAULTS = { mode: 'manual', models: true, box: true, tools: true, fade: true, dense: true };
   const ROLES = ['pane', 'col', 'head', 'row', 'footer', 'dock', 'content', 'inputwrap', 'end'];
   const STATE_CLASSES = [
-    'tss-on', 'tss-hide', 'tss-models', 'tss-tools',
+    'tss-on', 'tss-hide', 'tss-head', 'tss-models', 'tss-box', 'tss-tools',
     'tss-fold', 'tss-fade', 'tss-dense', 'tss-phone', 'tss-ready',
   ];
 
@@ -151,6 +185,7 @@
 
   const mqPhone = mq('(max-width: 767.98px)');
   const mqDark = mq('(prefers-color-scheme: dark)');
+  const mqFine = mq('(pointer: fine)');
 
   const queueMicro = typeof window.queueMicrotask === 'function'
     ? (fn) => window.queueMicrotask(fn)
@@ -175,6 +210,7 @@
     return {
       mode: !resetMode && MODES.includes(src.mode) ? src.mode : DEFAULTS.mode,
       models: bool(src.models, DEFAULTS.models),
+      box: bool(src.box, DEFAULTS.box),
       tools: bool(src.tools, DEFAULTS.tools),
       fade: bool(src.fade, DEFAULTS.fade),
       dense: bool(src.dense, DEFAULTS.dense),
@@ -192,7 +228,7 @@
     s = s && typeof s === 'object' ? s : {};
 
     // Older versions defaulted to auto-hide. Move those installs to the
-    // new manual default once, keeping every other choice intact.
+    // manual default once, keeping every other choice intact.
     const stale = s.v !== SCHEMA;
 
     return {
@@ -285,7 +321,7 @@
    JS corrects the scroll position in the same frame, so the chat you
    are reading does not move; the header's space fills with content. */
 
-html.tss-on.tss-hide [data-tss-head] {
+html.tss-head.tss-hide [data-tss-head] {
   display: none !important;
 }
 
@@ -295,7 +331,29 @@ html.tss-models.tss-hide [data-tss-row] {
   display: none !important;
 }
 
-/* ---------- Minimized: the input tools fold away ---------- */
+/* ---------- Minimized: the message box and everything around it ----------
+   Attachments, conversation starters, the box and its tools all leave
+   the layout, and the footer that held them shrinks to nothing, so the
+   chat runs to the bottom of the screen. The model row follows its own
+   option above. On a phone with a home bar the footer keeps exactly the
+   system's safe area and nothing more. */
+
+html.tss-box.tss-hide [data-tss-footer] {
+  padding-top: 0 !important;
+  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+}
+
+html.tss-box.tss-hide [data-tss-footer] > :not(.tss-tab):not([data-tss-row]) {
+  display: none !important;
+}
+
+/* The end of the chat clears the floating chevron, so the last line of
+   a reply never ends up under it. */
+html.tss-box.tss-hide [data-tss-pane] > [data-element-id="scroll-padding"] {
+  margin-top: ${T.floatClear}px !important;
+}
+
+/* ---------- Minimized with the box kept: its tools fold away ---------- */
 
 html.tss-tools.tss-fold [data-tss-end] [data-element-id="chat-input-actions"] {
   display: none !important;
@@ -305,7 +363,8 @@ html.tss-tools.tss-fold [data-tss-end] [data-element-id="chat-input-actions"] {
    This fades the chat's own pixels with a mask. It paints nothing, so
    it cannot be the wrong color and it cannot show a band at the sides. */
 
-html.tss-fade [data-tss-pane] {
+html.tss-fade [data-tss-pane],
+html.tss-box.tss-hide [data-tss-pane] {
   --tss-fade: 30px;
   -webkit-mask-image:
     linear-gradient(to bottom, #000 calc(100% - var(--tss-fade)), transparent 100%);
@@ -317,6 +376,19 @@ html.tss-fade [data-tss-pane] {
 
 html.tss-fade.tss-phone [data-tss-pane] {
   --tss-fade: 22px;
+}
+
+/* Fully minimized, the chevron floats over the end of the chat, so the
+   fade is always there and shaped to sit under it. */
+html.tss-box.tss-hide [data-tss-pane] {
+  -webkit-mask-image: linear-gradient(to bottom,
+    #000 calc(100% - ${T.floatFade}px),
+    rgba(0, 0, 0, .35) calc(100% - 26px),
+    transparent calc(100% - 6px));
+  mask-image: linear-gradient(to bottom,
+    #000 calc(100% - ${T.floatFade}px),
+    rgba(0, 0, 0, .35) calc(100% - 26px),
+    transparent calc(100% - 6px));
 }
 
 /* ---------- Tighter spacing ----------
@@ -347,12 +419,17 @@ html.tss-dense.tss-phone [data-element-id="chat-space-beginning-part"] {
 }
 
 /* ---------- The chevron ----------
-   A small chip centred on the message box, straddling its top edge.
-   Its tint and its ring are made from the app's own text color, so it
-   reads correctly on any theme without a single line of color code. */
+   A small chip centred just above the message box. Its tint and its
+   ring are made from the app's own text color, so it reads correctly
+   on any theme without a single line of color code.
+
+   It never animates its position or size. TypingMind animates the
+   footer it lives in, so that animation is switched off too: every
+   change lands in one frame and nothing slides afterwards. */
 
 html.tss-ready [data-tss-footer] {
   position: relative;
+  transition: none !important;
 }
 
 .tss-tab {
@@ -360,13 +437,18 @@ html.tss-ready [data-tss-footer] {
   box-sizing: border-box;
   position: absolute;
   z-index: 6;
-  left: 50%;
+  top: var(--tss-top, -${T.tabRise}px);
+  left: var(--tss-left, 50%);
   width: ${T.tabW}px;
   height: ${T.tabH}px;
   display: flex;
   align-items: center;
   justify-content: center;
   transform: translateX(-50%);
+  /* An arrow drawn from two borders sits off-centre once rotated. These
+     nudges put its visual middle on the circle's middle. */
+  --tss-up-y: 2.5px;
+  --tss-down-y: -3.25px;
   border-radius: 999px;
   background: rgba(128, 128, 128, .10);
   box-shadow: inset 0 0 0 1px rgba(128, 128, 128, .15);
@@ -376,7 +458,17 @@ html.tss-ready [data-tss-footer] {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
-  transition: background .15s ease, box-shadow .15s ease, transform .12s ease;
+  transition: background .15s ease, box-shadow .15s ease;
+}
+
+/* Fully minimized: the chevron floats just above the bottom of the
+   screen (or just above the model row, if that stays), over the faded
+   end of the chat. CSS alone anchors it to the footer, so nothing
+   recalculates it and it can't drift while you scroll. */
+html.tss-box.tss-hide .tss-tab {
+  top: auto;
+  bottom: calc(100% + ${T.floatGap}px);
+  left: 50%;
 }
 
 @supports (color: color-mix(in srgb, red, blue)) {
@@ -386,11 +478,18 @@ html.tss-ready [data-tss-footer] {
   }
 }
 
-/* Comfortable touch target without a bigger mark on screen */
+/* Comfortable touch target without a bigger mark on screen. The same
+   46 by 40 area as before the chip became a circle. */
 .tss-tab::after {
   content: "";
   position: absolute;
-  inset: -9px -8px;
+  inset: -9px -12px;
+}
+
+/* At the bottom edge the target stops short of the edge, so it can never
+   push the page past the bottom of the screen and make it scrollable. */
+html.tss-box.tss-hide .tss-tab::after {
+  inset: -9px -12px -${T.floatGap - 2}px;
 }
 
 .tss-tab::before {
@@ -402,13 +501,23 @@ html.tss-ready [data-tss-footer] {
   border-right: 1.75px solid currentColor;
   border-bottom: 1.75px solid currentColor;
   opacity: .5;
-  transform: translateY(2px) rotate(-135deg);
-  transition: transform .2s cubic-bezier(.2, .8, .2, 1), opacity .15s ease;
+  transform: translateY(var(--tss-up-y)) rotate(-135deg);
+  transition: opacity .15s ease;
 }
 
-/* Minimized: the chevron points down, "bring it all back" */
+/* Box kept: the chevron points down while minimized, "bring it all back" */
 html.tss-hide .tss-tab::before {
-  transform: translateY(-2px) rotate(45deg);
+  transform: translateY(var(--tss-down-y)) rotate(45deg);
+}
+
+/* Box minimized too: the chip works like the handle of a bottom drawer.
+   Down tucks everything away, up brings it back. */
+html.tss-box .tss-tab::before {
+  transform: translateY(var(--tss-down-y)) rotate(45deg);
+}
+
+html.tss-box.tss-hide .tss-tab::before {
+  transform: translateY(var(--tss-up-y)) rotate(-135deg);
 }
 
 @media (hover: hover) {
@@ -428,8 +537,15 @@ html.tss-hide .tss-tab::before {
   }
 }
 
+/* Pressed: a little brighter, never smaller or moved */
 .tss-tab.tss-press {
-  transform: translateX(-50%) scale(.92);
+  background: rgba(128, 128, 128, .2);
+}
+
+@supports (color: color-mix(in srgb, red, blue)) {
+  .tss-tab.tss-press {
+    background: color-mix(in srgb, currentColor 16%, transparent);
+  }
 }
 
 .tss-tab.tss-press::before {
@@ -660,6 +776,7 @@ html.tss-hide .tss-tab::before {
 
   let headOk = false;
   let rowOk = false;
+  let boxOk = false;
   let headH = 54;
   let rowH = 44;
 
@@ -671,6 +788,14 @@ html.tss-hide .tss-tab::before {
   let hidden = false;
   let folded = false;
   let chatKey = null;
+
+  // Opening a chat starts a short watch: a chat with no saved state that
+  // turns out to be empty is a new chat, and gets the message box back.
+  let entryAt = -1e9;
+  let entryManual = false;
+  let emptySince = 0;
+  let entryTimer = 0;
+  let editing = false;
 
   let lastY = 0;
   let lastClientH = 0;
@@ -693,6 +818,7 @@ html.tss-hide .tss-tab::before {
   let sheetEl = null;
   let toastEl = null;
   let styleEl = null;
+  let ghost = null;   // where the last chevron tap ended, to swallow its stray click
 
   let toastTimer = 0;
   let hintTimer = 0;
@@ -738,6 +864,8 @@ html.tss-hide .tss-tab::before {
     if (root.classList.contains(name) !== v) root.classList.toggle(name, v);
   }
 
+  const hasClass = (name) => root.classList.contains(name);
+
   function isEditable(el) {
     return !!(
       el &&
@@ -771,6 +899,16 @@ html.tss-hide .tss-tab::before {
     } catch (e) {
       return null;
     }
+  }
+
+  // The element that really has focus, looking inside shadow roots, so an
+  // input inside another extension's widget is never mistaken for "none".
+  function deepActive() {
+    let a = document.activeElement;
+    try {
+      while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    } catch (e) { /* closed or detached root */ }
+    return a;
   }
 
   function h(tag, attrs, kids) {
@@ -1010,6 +1148,18 @@ html.tss-hide .tss-tab::before {
         ? inputEl.parentElement
         : null;
 
+    // Minimizing the box hides every child of the footer except the
+    // chevron and the model row. That is only safe while the footer holds
+    // the composer and nothing else, so check before allowing it.
+    const nextBoxOk = !!(
+      pane && col && footer && end &&
+      footer !== col &&
+      footer !== document.body &&
+      footer !== root &&
+      !footer.contains(pane) &&
+      !(head && footer.contains(head))
+    );
+
     // A new chat pane means a new chat: reset scroll tracking. In manual
     // mode each chat's own saved state is restored by checkRoute().
     const paneChanged = pane !== parts.pane;
@@ -1036,6 +1186,11 @@ html.tss-hide .tss-tab::before {
     changed = setRole('content', content) || changed;
     changed = setRole('inputwrap', inputwrap) || changed;
     changed = setRole('end', end) || changed;
+
+    if (nextBoxOk !== boxOk) {
+      boxOk = nextBoxOk;
+      changed = true;
+    }
 
     if (tabEl) {
       if (footer && tabEl.parentElement !== footer) {
@@ -1133,7 +1288,15 @@ html.tss-hide .tss-tab::before {
    * Classes and minimized state
    * =================================================================*/
 
-  const canHide = () => cfg().mode !== 'off' && headOk;
+  // Minimizing is available when at least one part it acts on was found
+  function canHide() {
+    const c = cfg();
+    if (c.mode === 'off') return false;
+    return headOk || (c.box && boxOk) || (c.models && rowOk);
+  }
+
+  // The message box is minimized right now
+  const boxMin = () => hidden && hasClass('tss-box');
 
   function applyClasses() {
     if (dead) return;
@@ -1142,15 +1305,21 @@ html.tss-hide .tss-tab::before {
 
     setClass('tss-phone', isPhone());
     setClass('tss-on', active);
+    setClass('tss-head', active && headOk);
     setClass('tss-models', active && c.models && rowOk);
+    setClass('tss-box', active && c.box && boxOk);
     setClass('tss-tools', c.tools && !!parts.end);
     setClass('tss-fade', c.fade && !!parts.pane);
     setClass('tss-dense', c.dense);
     setClass('tss-ready', !!(parts.footer && tabEl && tabEl.parentElement === parts.footer));
 
-    // Re-apply your choice whenever the parts come back. If the header is
+    // Re-apply your choice whenever the parts come back. If a part is
     // missing for a moment, the layout shows it, but the choice is kept.
     applyHidden(want && active);
+
+    // An option changed while minimized: never leave focus inside
+    // something that just left the screen.
+    if (hidden) releaseFocus();
 
     updateTools();
     updateTabLabel();
@@ -1158,11 +1327,12 @@ html.tss-hide .tss-tab::before {
   }
 
   /* Record what you want for this chat, then apply it if possible.
-   * manual = you did it (tap, shortcut, console). Only manual choices in
-   * Manual mode are saved to the chat's memory. */
+   * manual = you did it (tap, shortcut, typing, Edit, console). Only
+   * manual choices in Manual mode are saved to the chat's memory. */
   function setWant(value, manual) {
     const v = !!value;
     if (manual) {
+      entryManual = true;
       holdY = parts.pane ? parts.pane.scrollTop : 0;
       acc = 0;
       if (cfg().mode === 'manual') remember(chatKey, v);
@@ -1171,19 +1341,79 @@ html.tss-hide .tss-tab::before {
     applyHidden(v && canHide());
   }
 
+  /* Focus must never stay inside something that is leaving the screen:
+   * a hidden message box would swallow your typing, and on a phone it
+   * would keep the keyboard open over nothing. */
+  function releaseFocus() {
+    const ae = document.activeElement;
+    if (!ae || ae === document.body || ae === root || ae === tabEl) return;
+    const zones = [];
+    if (hasClass('tss-head')) zones.push(parts.head);
+    if (hasClass('tss-models')) zones.push(parts.row);
+    if (hasClass('tss-box')) zones.push(parts.footer);
+    if (zones.some((z) => z && z.contains(ae))) {
+      try {
+        ae.blur();
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  /* TypingMind keeps an empty spacer under the last message, sized from
+   * the chat area's height, so a short reply can scroll up to the top. It
+   * re-sizes that spacer half a second after the chat area changes size,
+   * and if you are near the end of the chat that late re-size shifts the
+   * text on its own. That was the "auto scroll" after a toggle. Here the
+   * same re-size happens in the same frame as the toggle instead.
+   * It only runs while TypingMind's spacer still matches this formula, so
+   * if they ever change theirs, this quietly steps aside. */
+  function spacerFor(paneH) {
+    const items = document.querySelectorAll('.dynamic-chat-content-container > *');
+    if (!items.length) return 1;
+    const post = document.querySelector('.post-message-content');
+    const postH = post ? post.offsetHeight : 0;
+    const last = items[items.length - 1];
+    const lastH = last ? last.offsetHeight : 0;
+    return Math.max(1, Math.min(paneH - postH - lastH - 100, window.innerHeight));
+  }
+
+  function spacerInSync(p) {
+    let sp = null;
+    try {
+      sp = p.querySelector(':scope > [data-element-id="scroll-padding"]');
+    } catch (e) {
+      return null;
+    }
+    if (!sp) return null;
+    const raw = sp.style.paddingBottom;
+    if (!/^\d+(\.\d+)?px$/.test(raw)) return null;
+    return Math.abs(parseFloat(raw) - spacerFor(p.clientHeight)) <= 1 ? sp : null;
+  }
+
   /* Collapsing the header changes where the chat pane starts. Measure the
    * pane before and after the class flips and move the scroll position by
    * the same amount, so the words you are reading stay exactly where they
-   * are and the freed space fills with more conversation. */
+   * are and the freed space fills with more conversation. The message
+   * box leaving only makes the pane taller at the bottom, which needs no
+   * correction. */
   function applyHidden(value) {
     const v = !!value;
     if (v === hidden) return;
 
+    if (v) releaseFocus();
+
     const p = parts.pane && parts.pane.isConnected ? parts.pane : null;
     const before = p ? p.getBoundingClientRect().top : null;
+    const spacer = p ? spacerInSync(p) : null;
 
     hidden = v;
     setClass('tss-hide', v);
+
+    // Resize TypingMind's spacer now, in this frame, instead of letting
+    // TypingMind do it half a second later and shift the chat on its own.
+    if (spacer) {
+      const next = spacerFor(p.clientHeight) + 'px';
+      if (spacer.style.paddingBottom !== next) spacer.style.paddingBottom = next;
+    }
 
     if (p && before !== null) {
       const delta = before - p.getBoundingClientRect().top;
@@ -1198,19 +1428,20 @@ html.tss-hide .tss-tab::before {
 
     updateTools();
     updateTabLabel();
-    schedulePlaceTab();
 
-    if (v && parts.head && parts.head.contains(document.activeElement)) {
-      try {
-        document.activeElement.blur();
-      } catch (e) { /* ignore */ }
-    }
+    // Coming back: put the chevron above the box in this same frame, so
+    // it never shows for a frame at the bottom edge where it used to be.
+    if (!v) placeTab();
+    else schedulePlaceTab();
   }
 
   function updateTabLabel() {
     if (!tabEl) return;
     const active = canHide();
-    const label = !active ? 'Space Saver options' : hidden ? 'Restore the header' : 'Minimize the header';
+    const what = hasClass('tss-box') ? 'the header and message box' : 'the header';
+    const label = !active
+      ? 'Space Saver options'
+      : hidden ? 'Bring back ' + what : 'Minimize ' + what;
 
     if (tabEl.getAttribute('aria-label') !== label) tabEl.setAttribute('aria-label', label);
 
@@ -1239,6 +1470,8 @@ html.tss-hide .tss-tab::before {
     const keyChanged = key !== chatKey;
     chatKey = key;
 
+    if (keyChanged) beginEntry();
+
     if (cfg().mode === 'auto') {
       acc = 0;
       holdY = null;
@@ -1255,6 +1488,135 @@ html.tss-hide .tss-tab::before {
       holdY = null;
       setWant(saved);
     }
+  }
+
+  /* =================================================================
+   * New chats
+   *
+   * A minimized box is the right call for reading, never for a chat
+   * with nothing in it yet. When you open a chat that has no saved state
+   * of its own and it stays empty for a moment, it is a new chat, so the
+   * box comes back once, right as the chat opens. Nothing is saved, and
+   * nothing changes after that, including when the first reply arrives.
+   * =================================================================*/
+
+  function beginEntry() {
+    entryAt = now();
+    entryManual = false;
+    emptySince = 0;
+    if (!entryTimer && !dead) entryTimer = setTimeout(checkEntry, T.entryStepMs);
+  }
+
+  function chatIsEmpty() {
+    const p = document.querySelector(SEL.pane);
+    if (!p || !p.isConnected) return false;
+    return !p.querySelector(SEL.message);
+  }
+
+  function checkEntry() {
+    entryTimer = 0;
+    if (dead) return;
+
+    const t = now();
+    const c = cfg();
+    if (t - entryAt > T.entryMs) return;
+    if (entryManual || !want || c.mode !== 'manual' || !c.box) return;
+    if (recall(chatKey) !== null) return;
+
+    if (!chatIsEmpty()) {
+      // Possibly the previous chat, still on screen for a moment. Keep watching.
+      emptySince = 0;
+    } else {
+      if (!emptySince) emptySince = t;
+      if (t - emptySince >= T.emptyMs) {
+        setWant(false);
+        // TypingMind focuses the box when a new chat opens. The box was
+        // hidden at that moment, so finish the job for it, on computers
+        // only, so a phone never pops its keyboard on its own.
+        if (mqFine.matches) focusBox(false);
+        return;
+      }
+    }
+
+    entryTimer = setTimeout(checkEntry, T.entryStepMs);
+  }
+
+  /* =================================================================
+   * Getting back to the message box
+   * =================================================================*/
+
+  function textbox() {
+    return (parts.end && parts.end.querySelector(SEL.textbox)) || document.querySelector(SEL.textbox);
+  }
+
+  /* Put the cursor in the message box. Unless forced, never while you
+   * are in another field, a menu or a dialog, so it can't pull you out
+   * of something you are doing. A button keeping focus after a click,
+   * like New chat, doesn't count. */
+  function focusBox(force) {
+    const tb = textbox();
+    if (!tb || !tb.isConnected) return false;
+    if (!force) {
+      const ae = deepActive();
+      if (ae && ae !== tb && isEditable(ae)) return false;
+      if (ae && safeClosest(ae, POPUP_SEL)) return false;
+    }
+    try {
+      tb.focus({ preventScroll: true });
+    } catch (e) {
+      return false;
+    }
+    return document.activeElement === tb;
+  }
+
+  // Something you did needs the box (Edit on a message): bring it back
+  function composerNeeded() {
+    if (!boxMin()) return;
+    setWant(false, true);
+    focusBox(false);
+  }
+
+  // Edit, however it was started, shows a label inside the hidden box
+  function checkEditing() {
+    const end = parts.end;
+    const isEditing = !!(end && end.querySelector(SEL.editLabel));
+    if (isEditing && !editing) composerNeeded();
+    editing = isEditing;
+  }
+
+  /* Typing with nothing focused brings the box back and the keystroke
+   * lands in it. It only ever happens while the box is
+   * minimized, and never while any field, menu or dialog has your
+   * attention, so it cannot steal keys from anything else. */
+  function quietTarget(t) {
+    if (!t || t === document.body || t === root || t === document) return true;
+    if (!(t instanceof Element)) return false;
+    if (inUI(t) || isEditable(t)) return false;
+    if (!parts.pane || !parts.pane.contains(t)) return false;
+    const ctl = safeClosest(t, INTERACTIVE);
+    return !ctl || ctl === parts.pane || ctl.contains(parts.pane);
+  }
+
+  function onTypeKey(e) {
+    if (dead || e.defaultPrevented || e.isComposing || e.repeat) return;
+    // A phone's on-screen keyboard only types into a focused field, which
+    // never counts as quiet below, so this is keyboards only by nature.
+    if (!boxMin()) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (typeof e.key !== 'string' || e.key.length !== 1 || e.key === ' ') return;
+
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    if (!quietTarget(path[0] || e.target) || !quietTarget(deepActive())) return;
+    if (sheetEl || popupOpen()) return;
+
+    // Selected text means you may be using a highlighter or copy shortcut
+    try {
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed && String(sel).trim()) return;
+    } catch (err) { /* ignore */ }
+
+    setWant(false, true);
+    focusBox(true);
   }
 
   // Auto-hide only: nothing to scroll means nothing to make room for
@@ -1283,7 +1645,7 @@ html.tss-hide .tss-tab::before {
   }
 
   /* =================================================================
-   * Auto-hide mode only: the header ducks on deliberate downward scroll
+   * Auto-hide mode only: things duck away on deliberate downward scroll
    * =================================================================*/
 
   function inputActive() {
@@ -1314,7 +1676,7 @@ html.tss-hide .tss-tab::before {
 
     if (dy !== 0 && (touchInPane || barDrag)) gestureDir = Math.sign(dy);
 
-    if (cfg().mode !== 'auto' || !headOk) return;
+    if (cfg().mode !== 'auto' || !canHide()) return;
 
     // The chat area changed size (tools folded, keyboard, row wrapped).
     // A scroll jump caused by that is not you scrolling.
@@ -1329,7 +1691,7 @@ html.tss-hide .tss-tab::before {
       acc = 0;
     }
 
-    // One-way: scrolling up never reopens the header
+    // One-way: scrolling up never brings things back
     if (dy <= 0) {
       if (dy < 0) acc = 0;
       return;
@@ -1374,7 +1736,7 @@ html.tss-hide .tss-tab::before {
   }
 
   /* =================================================================
-   * Input tools
+   * Input tools (only when the message box itself is kept)
    *
    * They fold only while you are minimized, so nothing folds on a timer
    * and nothing folds because you touched a control. They come straight
@@ -1382,11 +1744,7 @@ html.tss-hide .tss-tab::before {
    * =================================================================*/
 
   function textboxHasText() {
-    const end = parts.end;
-    const tb =
-      (end && end.querySelector(SEL.textbox)) ||
-      document.querySelector(SEL.textbox) ||
-      (end && end.querySelector('textarea, [contenteditable="true"]'));
+    const tb = textbox() || (parts.end && parts.end.querySelector('textarea, [contenteditable="true"]'));
     if (!tb) return false;
     const v = typeof tb.value === 'string' ? tb.value : tb.textContent;
     return !!(v && v.length);
@@ -1440,27 +1798,36 @@ html.tss-hide .tss-tab::before {
 
   function updateTools() {
     if (dead) return;
-    const want = !!(cfg().tools && hidden && parts.end && !toolsMustShow());
-    if (want === folded) return;
-    folded = want;
-    setClass('tss-fold', want);
+    const next = !!(cfg().tools && hidden && parts.end && !boxMin() && !toolsMustShow());
+    if (next === folded) return;
+    folded = next;
+    setClass('tss-fold', next);
     schedulePlaceTab();
   }
 
   /* =================================================================
-   * Chevron placement: centred on the message box, straddling its top
-   * edge. It never changes side and never reserves space of its own.
+   * Chevron placement: centred on the message box, just above it. When
+   * the box is minimized, CSS pins the chevron to the bottom edge
+   * instead, and nothing here touches it.
    * =================================================================*/
 
   function schedulePlaceTab() {
     if (!placeRaf && !dead) placeRaf = requestAnimationFrame(placeTab);
   }
 
+  function setTabVar(name, value) {
+    if (tabEl.style.getPropertyValue(name) !== value) tabEl.style.setProperty(name, value);
+  }
+
   function placeTab() {
-    placeRaf = 0;
+    if (placeRaf) {
+      cancelAnimationFrame(placeRaf);
+      placeRaf = 0;
+    }
     const f = parts.footer;
     const end = parts.end;
     if (!tabEl || !f || tabEl.parentElement !== f) return;
+    if (boxMin()) return;
 
     const fr = f.getBoundingClientRect();
     if (!fr.width) return;
@@ -1471,25 +1838,29 @@ html.tss-hide .tss-tab::before {
     const originY = fr.top + f.clientTop;
 
     let top = -T.tabRise;
-    let left = Math.round(f.clientWidth / 2);
+    let left = f.clientWidth / 2;
 
     const er = end && end.isConnected ? end.getBoundingClientRect() : null;
     if (er && er.width) {
       top = er.top - originY - T.tabRise;
-      left = Math.round(er.left - originX + er.width / 2);
+      left = er.left - originX + er.width / 2;
     }
 
-    const topPx = Math.round(top) + 'px';
-    const leftPx = left + 'px';
-    if (tabEl.style.top !== topPx) tabEl.style.top = topPx;
-    if (tabEl.style.left !== leftPx) tabEl.style.left = leftPx;
+    // Exact values, never rounded: rounding can flip a pixel back and
+    // forth on screens with fractional scaling.
+    setTabVar('--tss-top', top.toFixed(2) + 'px');
+    setTabVar('--tss-left', left.toFixed(2) + 'px');
   }
 
   /* =================================================================
    * Chevron
    * =================================================================*/
 
-  function onTabTap() {
+  /* source: 'mouse' | 'touch' | 'pen' | 'key'
+   * Bringing things back with a mouse puts the cursor in the box, the
+   * way TypingMind does on a computer. A tap on a phone never does, so
+   * the keyboard only opens when you tap into the box yourself. */
+  function onTabTap(source) {
     closeToast(true);
 
     if (sheetEl) {
@@ -1502,7 +1873,9 @@ html.tss-hide .tss-tab::before {
       return;
     }
 
+    const restoring = hidden;
     setWant(!hidden, true);
+    if (restoring && source === 'mouse') focusBox(false);
   }
 
   function makeTab() {
@@ -1535,7 +1908,7 @@ html.tss-hide .tss-tab::before {
     b.addEventListener('pointerdown', (e) => {
       lastType = e.pointerType || 'mouse';
 
-      // Keep focus in the message box so nothing shifts under your finger
+      // Keep focus where it is so nothing shifts under your finger
       e.preventDefault();
 
       if (e.button !== 0) return;
@@ -1574,15 +1947,36 @@ html.tss-hide .tss-tab::before {
       }
     });
 
-    b.addEventListener('pointerup', () => {
+    b.addEventListener('pointerup', (e) => {
       if (!down) return;
       const wasCancelled = cancelled;
       release();
+      // The chevron moves when the box comes and goes. Whatever ends up
+      // under your finger must not get the click this tap produces.
+      ghost = { x: e.clientX, y: e.clientY, t: now() };
       if (!wasCancelled) {
         lastHandled = now();
-        onTabTap();
+        onTabTap(lastType);
       }
     });
+
+    // A touch that ends on the chevron never turns into mouse events or a
+    // click on something else.
+    b.addEventListener('touchend', (e) => {
+      if (e.cancelable) e.preventDefault();
+    }, { passive: false });
+
+    // The chevron sits over the chat. A mouse wheel over it scrolls the
+    // chat, exactly as if the chevron were not there.
+    b.addEventListener('wheel', (e) => {
+      const p = parts.pane;
+      if (!p || e.ctrlKey || !e.deltaY) return;
+      const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? p.clientHeight : 1;
+      e.preventDefault();
+      lastWheel = now();
+      gestureDir = Math.sign(e.deltaY);
+      p.scrollBy(0, e.deltaY * unit);
+    }, { passive: false });
 
     b.addEventListener('pointercancel', () => {
       cancelled = true;
@@ -1593,7 +1987,7 @@ html.tss-hide .tss-tab::before {
     // Pointer events handle taps. Click stays for keyboard and screen readers.
     b.addEventListener('click', (e) => {
       e.preventDefault();
-      if (now() - lastHandled > 700) onTabTap();
+      if (now() - lastHandled > 700) onTabTap('key');
     });
 
     b.addEventListener('contextmenu', (e) => {
@@ -1609,7 +2003,7 @@ html.tss-hide .tss-tab::before {
         e.preventDefault();
         if (e.repeat) return;
         lastHandled = now();
-        onTabTap();
+        onTabTap('key');
         return;
       }
       if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
@@ -1628,6 +2022,7 @@ html.tss-hide .tss-tab::before {
 
   const OPTIONS = [
     { key: 'models', label: 'Also minimize the model row' },
+    { key: 'box', label: 'Also minimize the message box' },
     { key: 'tools', label: 'Also minimize the input tools' },
     { key: 'fade', label: 'Fade the bottom of the chat' },
     { key: 'dense', label: 'Tighter spacing' },
@@ -1635,12 +2030,23 @@ html.tss-hide .tss-tab::before {
 
   const MODE_LABELS = { manual: 'Manual', auto: 'Auto-hide', off: 'Off' };
 
+  // Options that only mean something while minimizing is on
+  const MIN_KEYS = new Set(['models', 'box', 'tools']);
+
+  function optionDisabled(key, c) {
+    if (MIN_KEYS.has(key) && c.mode === 'off') return true;
+    // The tools leave together with the box, so their switch has no say
+    return key === 'tools' && c.box;
+  }
+
   function modeNote(mode) {
+    const c = cfg();
     if (mode === 'manual') {
-      return isPhone()
-        ? 'Nothing moves on its own. Tap the chevron to minimize, tap it again to bring everything back.'
-        : 'Nothing moves on its own. Tap the chevron or press ' + SHORTCUT +
-          ' to minimize, again to restore.';
+      if (isPhone()) {
+        return 'Nothing moves on its own. Tap the chevron to minimize, tap it again to bring everything back.';
+      }
+      return 'Nothing moves on its own. Tap the chevron or press ' + SHORTCUT +
+        ' to minimize, again to restore.' + (c.box ? ' Typing also brings the box back.' : '');
     }
     if (mode === 'auto') {
       return 'Minimizes on its own when you scroll down. Comes back when you tap the chevron or open another chat.';
@@ -1665,8 +2071,9 @@ html.tss-hide .tss-tab::before {
     sheetEl.querySelectorAll('.tss-opt').forEach((opt) => {
       const key = opt.getAttribute('data-key');
       const sw = opt.querySelector('.tss-switch');
-      const disabled = (key === 'models' || key === 'tools') && c.mode === 'off';
-      sw.setAttribute('aria-checked', String(!!c[key]));
+      const disabled = optionDisabled(key, c);
+      const checked = key === 'tools' && c.box ? true : !!c[key];
+      sw.setAttribute('aria-checked', String(checked));
       sw.disabled = disabled;
       opt.setAttribute('aria-disabled', String(disabled));
     });
@@ -1710,7 +2117,8 @@ html.tss-hide .tss-tab::before {
 
   function toggleOption(key) {
     const c = cfg();
-    if ((key === 'models' || key === 'tools') && c.mode === 'off') return;
+    if (!Object.prototype.hasOwnProperty.call(DEFAULTS, key) || key === 'mode') return;
+    if (optionDisabled(key, c)) return;
     c[key] = !c[key];
     saveStore();
     applyClasses();
@@ -1718,7 +2126,7 @@ html.tss-hide .tss-tab::before {
     requestAnimationFrame(positionSheet);
 
     // Let TypingMind re-fit the text box after spacing changes
-    if (key === 'dense') {
+    if (key === 'dense' || key === 'box') {
       requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
     }
   }
@@ -1901,6 +2309,24 @@ html.tss-hide .tss-tab::before {
   }
 
   function installListeners() {
+    // Last line of defence for a chevron tap: if the click it makes lands
+    // on something else because the layout moved, it never arrives there.
+    on(window, 'click', (e) => {
+      const g = ghost;
+      if (!g) return;
+      if (now() - g.t > 700) {
+        ghost = null;
+        return;
+      }
+      const t = e.target instanceof Node ? e.target : null;
+      if (t && tabEl && tabEl.contains(t)) return;
+      if (Math.abs(e.clientX - g.x) <= 24 && Math.abs(e.clientY - g.y) <= 24) {
+        ghost = null;
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+
     on(document, 'scroll', onScroll, { capture: true, passive: true });
 
     on(document, 'touchstart', (e) => {
@@ -1953,11 +2379,15 @@ html.tss-hide .tss-tab::before {
       if (parts.footer && e.target instanceof Node && parts.footer.contains(e.target)) updateTools();
     }, true);
 
-    // A click is how you usually open another chat. Check the URL right
-    // after TypingMind handles it, and once more in case it updates late.
-    on(document, 'click', () => {
+    // A click is how you usually open another chat, or start editing a
+    // message. Check right after TypingMind handles it, and once more in
+    // case the URL updates late.
+    on(document, 'click', (e) => {
+      const edit = e.target instanceof Element ? safeClosest(e.target, SEL.editButton) : null;
       setTimeout(() => {
         checkRoute();
+        if (edit) composerNeeded();
+        checkEditing();
         updateTools();
       }, 0);
       setTimeout(checkRoute, 150);
@@ -1970,7 +2400,9 @@ html.tss-hide .tss-tab::before {
         if (!parts.pane || !canHide()) return;
         e.preventDefault();
         e.stopPropagation();
+        const restoring = hidden;
         setWant(!hidden, true);
+        if (restoring) focusBox(false);
         return;
       }
 
@@ -1992,6 +2424,10 @@ html.tss-hide .tss-tab::before {
       }
     }, true);
 
+    // Bubble phase on purpose: TypingMind and other extensions see the
+    // key first, and anything they claim is left alone.
+    on(document, 'keydown', onTypeKey, false);
+
     const onResize = () => {
       schedulePlaceTab();
       scheduleMeasure();
@@ -2011,7 +2447,7 @@ html.tss-hide .tss-tab::before {
     on(window, 'hashchange', checkRoute);
 
     // Chromium and newer Safari report every URL change here, including
-    // history.pushState, so chat switches are caught instantly.
+    // history.replaceState, so chat switches are caught instantly.
     const nav = window.navigation;
     if (nav && typeof nav.addEventListener === 'function') {
       on(nav, 'currententrychange', () => queueMicro(checkRoute));
@@ -2055,7 +2491,7 @@ html.tss-hide .tss-tab::before {
     });
 
     clearInterval(pollTimer);
-    [hintTimer, toastTimer].forEach(clearTimeout);
+    [hintTimer, toastTimer, entryTimer].forEach(clearTimeout);
 
     if (ro) ro.disconnect();
     if (structMO) structMO.disconnect();
@@ -2106,13 +2542,14 @@ html.tss-hide .tss-tab::before {
 
     installListeners();
 
-    // Start the open chat the way you left it. The header is applied as
-    // soon as it has been found and measured.
+    // Start the open chat the way you left it. The parts are applied as
+    // soon as they have been found and measured.
     lastLoc = location.pathname + location.search + location.hash;
     chatKey = currentChatKey();
     const saved = recall(chatKey);
     want = saved !== null ? saved : chats.last;
     if (cfg().mode === 'auto') want = false;
+    beginEntry();
 
     sync();
     watchStructure(); // covers the app not having rendered the chat yet
@@ -2124,6 +2561,7 @@ html.tss-hide .tss-tab::before {
       // A feature that measured badly earlier gets another chance every tick
       if (roDisabled || !headOk || (cfg().models && !rowOk)) scheduleMeasure();
       checkShortChat();
+      checkEditing();
       updateTools();
       schedulePlaceTab();
     }, T.pollMs);
@@ -2173,11 +2611,13 @@ html.tss-hide .tss-tab::before {
           headerHeight: headH,
           modelRowFound: rowOk,
           modelRowHeight: rowH,
+          messageBoxFound: boxOk,
           chatId: chatKey,
           chatRemembered: recall(chatKey),
           chatsRemembered: Object.keys(chats.map).length,
           wanted: want,
           minimized: hidden,
+          boxMinimized: boxMin(),
           toolsFolded: folded,
           resizeObserver: roDisabled ? 'polling' : 'on',
           parts: found,
