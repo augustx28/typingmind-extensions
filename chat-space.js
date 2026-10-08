@@ -116,8 +116,8 @@
     pollMs: 800,
     longPressMs: 450,
     outsideQuietMs: 600,  // auto-hide mode: quiet window after tapping a control
-    tabW: 30,             // same as the height, so the chip is a circle
-    tabH: 30,
+    tabW: 50,             // same as the height, so the chip is a circle
+    tabH: 50,
     tabGap: 8,            // clear space between the chip and the message box
     floatGap: 8,          // fully minimized: chip's distance from the bottom edge
     floatFade: 44,        // fully minimized: height of the fade under the chip
