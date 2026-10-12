@@ -228,13 +228,6 @@
     }
 
     /* =========================================
-       4. Homepage Logo
-       ========================================= */
-    .antialiased > .justify-start > .justify-start img {
-      visibility: hidden !important;
-    }
-
-    /* =========================================
        5. Mobile Media Queries
        ========================================= */
     /* NOTE: every rule removed from this section targeted a workspace tab by
