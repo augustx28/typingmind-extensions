@@ -1,6 +1,27 @@
-// TypingMind Page Outline Extension v5.0
+// TypingMind Page Outline Extension v5.2
 // Groups response headings beneath each user input.
-// Toggle button (draggable) or Ctrl/Cmd + Shift + O.
+// Open it with the button (draggable), Ctrl/Cmd + Shift + O, or a swipe
+// left on the chat (touch screens). Swipe the open panel right to close it.
+//
+// v5.2 changes:
+// - Dimmer text in dark mode. Headings, inputs, the small labels and the
+//   speech bubbles each step down a notch. Light mode is unchanged.
+//
+// v5.1 changes:
+// - Darker dark mode: the panel is back to v4.8's depth, still warm, and
+//   its text is a touch softer.
+// - The rounded-square button and its original icon are back. At rest it
+//   is see-through like v4.8, so it stays quiet. It still lifts while you
+//   drag it, and the open state is gray instead of gold.
+// - Swipe is built in. Swipe left anywhere on the chat to open the outline;
+//   a quick flick works too. It doesn't need the screen edge, where
+//   Android's Back swipe lives. The message box, dialogs, and content that
+//   scrolls sideways (wide code blocks, tables) keep their own swipes.
+// - Drag the open panel to the right to close it. It follows your finger,
+//   then slides away, or springs back if you let go early.
+// - Opened by a swipe, the panel slides in from the right.
+// - If the old right-edge swipe add-on is still loaded, it is switched off,
+//   since the swipe now lives here.
 //
 // v5.0 changes (design only; everything works the same as v4.8):
 // - New palette: quiet warm grays in light and dark mode. The gold accent
@@ -72,7 +93,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '5.0';
+  const VERSION = '5.2';
   const NAMESPACE = '__tmPageOutline';
 
   const PANEL_ID = 'tm-page-outline-panel';
@@ -140,6 +161,35 @@
   const REFRESH_MAX_WAIT_MS = 1600;
   const VISIBILITY_THROTTLE_MS = 120;
 
+  // Swipe gestures (touch only)
+  const SWIPE_DECIDE_PX = 10;       // travel before the direction is judged
+  const SWIPE_RATIO = 1.6;          // sideways must beat vertical by this much
+  const SWIPE_DECIDE_MS = 450;      // slower starts are scrolls or selections
+  const SWIPE_OPEN_PX = 56;         // left travel that opens the panel
+  const SWIPE_FLICK_PX = 26;        // a fast flick needs only this much
+  const SWIPE_FLICK_SPEED = 0.3;    // px per ms
+  const SWIPE_CLOSE_PX = 72;        // right drag on the panel that closes it
+  const SWIPE_CLOSE_FLICK_PX = 24;  // or a fast flick this long
+  const SWIPE_RESET_MS = 260;       // after a swipe close, before reuse
+
+  // Swipes that start on these keep their own behavior.
+  const SWIPE_EXCLUDE_SELECTOR = [
+    `#${TOGGLE_ID}`,
+    `#${PANEL_ID}`,
+    'input',
+    'textarea',
+    'select',
+    '[contenteditable=""]',
+    '[contenteditable="true"]',
+    'dialog',
+    '[role="dialog"]',
+    '[aria-modal="true"]',
+    '[role="menu"]',
+    '[role="listbox"]',
+    '[data-element-id="side-bar"]',
+    '[data-element-id="sidebar"]'
+  ].join(', ');
+
   // Text limits
   const PROMPT_PREVIEW_LENGTH = 180;
   const PROMPT_TITLE_LENGTH = 1000;
@@ -148,17 +198,19 @@
   // Icons
   const TOGGLE_ICON = `
     <svg
+      width="14"
+      height="14"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      stroke-width="2"
+      stroke-width="2.2"
       stroke-linecap="round"
       stroke-linejoin="round"
       aria-hidden="true"
     >
-      <path d="M4 6h16"></path>
-      <path d="M9 12h11"></path>
-      <path d="M9 18h11"></path>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="12" x2="15" y2="12"></line>
+      <line x1="3" y1="18" x2="11" y2="18"></line>
     </svg>
   `;
 
@@ -198,6 +250,12 @@
   let navigationToken = 0;
   let clickingTab = false;
 
+  let chatSwipe = null;
+  let panelSwipe = null;
+  let panelSwipeFrame = null;
+  let poseTimer = null;
+  let suppressOutsideCloseUntil = 0;
+
   const nodeIds = new WeakMap();
   const flashTimers = new WeakMap();
   const iconCache = new WeakMap();
@@ -232,6 +290,21 @@
       .forEach((node) => node.remove());
 
     delete window.__tmPageOutlineV42Loaded;
+
+    // The swipe is built in now, so switch off the old right-edge add-on
+    // if it is still loaded. Otherwise both would answer the same swipe.
+    const oldSwipe = window.__tmPageOutlineSwipe;
+
+    if (oldSwipe && typeof oldSwipe.destroy === 'function') {
+      try {
+        oldSwipe.destroy();
+      } catch (error) {
+        console.debug(
+          '[Page Outline] Could not switch off the old swipe add-on.',
+          error
+        );
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -263,12 +336,12 @@
         --po-press: rgba(70, 60, 45, 0.095);
         --po-focus: rgba(70, 60, 45, 0.55);
         --po-scroll: rgba(70, 60, 45, 0.2);
-        --po-chip: rgba(251, 250, 248, 0.86);
-        --po-chip-hover: rgba(244, 243, 240, 0.96);
-        --po-chip-on: rgba(236, 234, 230, 0.98);
-        --po-lift:
-          0 1px 1px rgba(40, 32, 20, 0.05),
-          0 2px 6px rgba(40, 32, 20, 0.06);
+        --po-btn: rgba(120, 108, 90, 0.1);
+        --po-btn-hover: rgba(120, 108, 90, 0.17);
+        --po-btn-on: rgba(120, 108, 90, 0.2);
+        --po-btn-line: rgba(110, 98, 80, 0.13);
+        --po-btn-icon: rgba(88, 80, 68, 0.75);
+        --po-btn-icon-hover: rgba(58, 53, 46, 0.9);
         --po-shadow:
           0 1px 2px rgba(40, 32, 20, 0.05),
           0 6px 16px -4px rgba(40, 32, 20, 0.1),
@@ -282,27 +355,27 @@
 
       .dark ${toggle},
       .dark ${panel} {
-        --po-surface: #252422;
-        --po-text: #e3e0da;
-        --po-text-2: #bbb7b0;
-        --po-text-3: #918d86;
-        --po-icon: #8c8881;
-        --po-line: rgba(255, 246, 232, 0.09);
-        --po-hover: rgba(255, 246, 232, 0.06);
-        --po-press: rgba(255, 246, 232, 0.1);
-        --po-focus: rgba(255, 246, 232, 0.42);
-        --po-scroll: rgba(255, 246, 232, 0.18);
-        --po-chip: rgba(46, 45, 42, 0.82);
-        --po-chip-hover: rgba(56, 54, 51, 0.94);
-        --po-chip-on: rgba(66, 64, 60, 0.97);
-        --po-lift:
-          0 1px 2px rgba(0, 0, 0, 0.3),
-          0 2px 8px rgba(0, 0, 0, 0.22);
+        --po-surface: #1c1b19;
+        --po-text: #c4c1bb;
+        --po-text-2: #9f9b95;
+        --po-text-3: #86827c;
+        --po-icon: #7d7973;
+        --po-line: rgba(255, 246, 232, 0.085);
+        --po-hover: rgba(255, 246, 232, 0.055);
+        --po-press: rgba(255, 246, 232, 0.09);
+        --po-focus: rgba(255, 246, 232, 0.4);
+        --po-scroll: rgba(255, 246, 232, 0.16);
+        --po-btn: rgba(255, 246, 232, 0.06);
+        --po-btn-hover: rgba(255, 246, 232, 0.11);
+        --po-btn-on: rgba(255, 246, 232, 0.13);
+        --po-btn-line: rgba(255, 246, 232, 0.08);
+        --po-btn-icon: rgba(226, 219, 207, 0.6);
+        --po-btn-icon-hover: rgba(236, 230, 219, 0.88);
         --po-shadow:
-          0 0 0 0.5px rgba(0, 0, 0, 0.3),
-          0 8px 24px -6px rgba(0, 0, 0, 0.55),
-          0 24px 48px -16px rgba(0, 0, 0, 0.5),
-          inset 0 1px 0 rgba(255, 250, 240, 0.04);
+          0 0 0 0.5px rgba(0, 0, 0, 0.35),
+          0 8px 24px -6px rgba(0, 0, 0, 0.6),
+          0 24px 48px -16px rgba(0, 0, 0, 0.55),
+          inset 0 1px 0 rgba(255, 250, 240, 0.035);
       }
 
       @media (pointer: coarse) {
@@ -314,7 +387,7 @@
         }
       }
 
-      /* Toggle button */
+      /* Toggle button: rounded square, see-through at rest */
 
       ${toggle} {
         position: fixed;
@@ -326,13 +399,11 @@
         height: ${BUTTON_SIZE}px;
         margin: 0;
         padding: 0;
-        border-radius: 50%;
-        border: 1px solid var(--po-line);
-        background: var(--po-chip);
-        color: var(--po-icon);
-        box-shadow: var(--po-lift);
-        backdrop-filter: blur(12px) saturate(1.1);
-        -webkit-backdrop-filter: blur(12px) saturate(1.1);
+        border-radius: 7px;
+        border: 1px solid var(--po-btn-line);
+        background: var(--po-btn);
+        color: var(--po-btn-icon);
+        box-shadow: none;
         cursor: pointer;
         display: flex;
         align-items: center;
@@ -342,7 +413,7 @@
         opacity: 0;
         visibility: hidden;
         pointer-events: none;
-        transform: scale(0.86);
+        transform: scale(0.9);
         transition:
           opacity 0.2s ease,
           transform 0.28s var(--po-ease),
@@ -360,13 +431,13 @@
 
       ${toggle} svg {
         display: block;
-        width: 16px;
-        height: 16px;
+        width: 14px;
+        height: 14px;
         pointer-events: none;
       }
 
       ${toggle}.chat-visible {
-        opacity: 0.92;
+        opacity: 0.7;
         visibility: visible;
         pointer-events: auto;
         transform: scale(1);
@@ -383,18 +454,18 @@
       @media (hover: hover) {
         ${toggle}:hover {
           opacity: 1;
-          background: var(--po-chip-hover);
-          color: var(--po-text-2);
+          background: var(--po-btn-hover);
+          color: var(--po-btn-icon-hover);
         }
       }
 
       ${toggle}:active {
-        background: var(--po-chip-on);
+        background: var(--po-btn-on);
       }
 
       ${toggle}.active {
         opacity: 1;
-        background: var(--po-chip-on);
+        background: var(--po-btn-on);
         color: var(--po-text);
       }
 
@@ -405,9 +476,10 @@
         opacity: 1;
         cursor: grabbing;
         background: var(--po-surface);
+        border-color: var(--po-line);
         color: var(--po-text-2);
         box-shadow: var(--po-shadow);
-        transform: scale(1.1);
+        transform: scale(1.06);
         transition:
           transform 0.22s var(--po-ease),
           box-shadow 0.22s ease,
@@ -427,7 +499,7 @@
           content: '';
           position: absolute;
           inset: -7px;
-          border-radius: 50%;
+          border-radius: 12px;
         }
       }
 
@@ -473,6 +545,7 @@
         pointer-events: none;
         transform: scale(0.96);
         transform-origin: top right;
+        touch-action: pan-y;
         transition:
           opacity 0.12s ease-in,
           transform 0.12s ease-in,
@@ -492,6 +565,26 @@
 
       .dark ${panel} {
         color-scheme: dark;
+      }
+
+      /* Swipe poses. Opened by a swipe, the panel slides in from the right,
+         and a swipe close sends it back out that way. While a finger drags
+         it, it follows with no easing. */
+
+      ${panel}.from-edge:not(.visible) {
+        transform: translateX(20px);
+      }
+
+      ${panel}.swipe-closing {
+        transition:
+          opacity 0.2s ease-out,
+          transform 0.22s var(--po-ease),
+          visibility 0s linear 0.22s;
+      }
+
+      ${panel}.tracking,
+      ${panel}.no-anim {
+        transition: none !important;
       }
 
       /* Panel header */
@@ -533,6 +626,7 @@
         min-height: 0;
         overflow-y: auto;
         overscroll-behavior: contain;
+        touch-action: pan-y;
         list-style: none;
         margin: 0;
         padding: 0 0 8px;
@@ -1259,6 +1353,12 @@
     list.addEventListener('keydown', handleListKeydown);
     list.addEventListener('scroll', handleListScroll, { passive: true });
 
+    // Drag the open panel to the right to close it.
+    panel.addEventListener('touchstart', handlePanelSwipeStart, { passive: true });
+    panel.addEventListener('touchmove', handlePanelSwipeMove, { passive: true });
+    panel.addEventListener('touchend', handlePanelSwipeEnd, { passive: true });
+    panel.addEventListener('touchcancel', handlePanelSwipeEnd, { passive: true });
+
     document.body.appendChild(panel);
 
     positionPanel();
@@ -1336,7 +1436,46 @@
   // Panel controls
   // ---------------------------------------------------------------------------
 
-  function setPanelVisibility(visible) {
+  // Put the panel in its start pose without animating, so the next open or
+  // close moves from the right place. fromEdge picks the slide-from-the-right
+  // pose that swipes use; otherwise the panel grows out of the button.
+  function resetPanelPose(fromEdge) {
+    if (poseTimer) {
+      clearTimeout(poseTimer);
+      poseTimer = null;
+    }
+
+    const panel = document.getElementById(PANEL_ID);
+
+    if (!panel) return;
+
+    const settled =
+      !panel.classList.contains('tracking') &&
+      !panel.classList.contains('swipe-closing') &&
+      !panel.style.transform &&
+      !panel.style.opacity &&
+      panel.classList.contains('from-edge') === fromEdge;
+
+    if (settled) return;
+
+    panel.classList.add('no-anim');
+    panel.classList.remove('tracking', 'swipe-closing');
+    panel.classList.toggle('from-edge', fromEdge);
+    panel.style.transform = '';
+    panel.style.opacity = '';
+
+    // Commit the pose before transitions come back on.
+    void panel.offsetWidth;
+
+    panel.classList.remove('no-anim');
+  }
+
+  function setPanelVisibility(visible, options = {}) {
+    if (!options.keepPose) {
+      cancelPanelSwipe();
+      resetPanelPose(Boolean(options.fromEdge));
+    }
+
     panelVisible = visible;
 
     const panel = document.getElementById(PANEL_ID);
@@ -1378,6 +1517,347 @@
   function handleToggleDoubleClick(event) {
     event.preventDefault();
     resetPosition();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Swipe gestures (touch only)
+  //
+  // Open: swipe left anywhere on the chat; a quick flick works too. It does
+  // not depend on the screen edge, where Android's Back swipe lives.
+  // Close: drag the open panel to the right. It follows the finger, then
+  // slides away, or springs back if you let go early.
+  //
+  // Every listener is passive, so none of this can hold up scrolling.
+  // ---------------------------------------------------------------------------
+
+  function vibrate(duration) {
+    try {
+      if (navigator.vibrate) navigator.vibrate(duration);
+    } catch (error) {
+      // Haptics are optional.
+    }
+  }
+
+  // Content that scrolls sideways (wide code blocks, tables, the model
+  // rail) keeps its own swipe.
+  function insideSidewaysScroller(element) {
+    let node = element;
+
+    while (
+      node &&
+      node !== document.body &&
+      node !== document.documentElement
+    ) {
+      if (node.scrollWidth > node.clientWidth + 1) {
+        const overflowX = getComputedStyle(node).overflowX;
+
+        if (
+          overflowX === 'auto' ||
+          overflowX === 'scroll' ||
+          overflowX === 'overlay'
+        ) {
+          return true;
+        }
+      }
+
+      node = node.parentElement;
+    }
+
+    return false;
+  }
+
+  function hasTextSelection() {
+    try {
+      const selection = window.getSelection();
+
+      return Boolean(
+        selection &&
+        !selection.isCollapsed &&
+        String(selection).trim()
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function openFromSwipe() {
+    if (panelVisible) return;
+
+    // The finger lifting can land as a click outside the panel; ignore it.
+    suppressOutsideCloseUntil = performance.now() + CLICK_SUPPRESS_MS;
+
+    setPanelVisibility(true, { fromEdge: true });
+    vibrate(8);
+  }
+
+  function handleChatSwipeStart(event) {
+    chatSwipe = null;
+
+    if (event.touches.length !== 1) return;
+    if (panelVisible || dragState) return;
+
+    const button = document.getElementById(TOGGLE_ID);
+
+    if (!button || !button.classList.contains('chat-visible')) return;
+
+    const target = event.target instanceof Element ? event.target : null;
+
+    if (!target || target.closest(SWIPE_EXCLUDE_SELECTOR)) return;
+
+    const touch = event.touches[0];
+    const now = performance.now();
+
+    chatSwipe = {
+      target,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      startTime: now,
+      lastX: touch.clientX,
+      lastTime: now,
+      speed: 0,
+      committed: false
+    };
+  }
+
+  function handleChatSwipeMove(event) {
+    const swipe = chatSwipe;
+
+    if (!swipe) return;
+
+    if (event.touches.length !== 1) {
+      chatSwipe = null;
+      return;
+    }
+
+    const touch = event.touches[0];
+    const now = performance.now();
+    const deltaX = touch.clientX - swipe.startX;
+    const deltaY = touch.clientY - swipe.startY;
+
+    if (!swipe.committed) {
+      const distance = Math.max(Math.abs(deltaX), Math.abs(deltaY));
+
+      if (distance < SWIPE_DECIDE_PX) return;
+
+      const leftward =
+        deltaX < 0 && Math.abs(deltaX) > Math.abs(deltaY) * SWIPE_RATIO;
+
+      // Scrolling, a slow drag, selecting text or a sideways scroller:
+      // not ours.
+      if (
+        !leftward ||
+        now - swipe.startTime > SWIPE_DECIDE_MS ||
+        panelVisible ||
+        hasTextSelection() ||
+        insideSidewaysScroller(swipe.target)
+      ) {
+        chatSwipe = null;
+        return;
+      }
+
+      swipe.committed = true;
+    }
+
+    swipe.speed = (swipe.lastX - touch.clientX) / Math.max(1, now - swipe.lastTime);
+    swipe.lastX = touch.clientX;
+    swipe.lastTime = now;
+
+    if (
+      -deltaX >= SWIPE_OPEN_PX &&
+      Math.abs(deltaX) > Math.abs(deltaY) * SWIPE_RATIO
+    ) {
+      chatSwipe = null;
+      openFromSwipe();
+    }
+  }
+
+  function handleChatSwipeEnd(event) {
+    const swipe = chatSwipe;
+
+    chatSwipe = null;
+
+    if (!swipe || !swipe.committed || event.type !== 'touchend') return;
+
+    // A short swipe still opens if it was quick.
+    const touch = event.changedTouches && event.changedTouches[0];
+    const deltaX = (touch ? touch.clientX : swipe.lastX) - swipe.startX;
+    const deltaY = (touch ? touch.clientY : swipe.startY) - swipe.startY;
+    const averageSpeed =
+      -deltaX / Math.max(1, performance.now() - swipe.startTime);
+
+    if (
+      -deltaX >= SWIPE_FLICK_PX &&
+      Math.abs(deltaX) > Math.abs(deltaY) * SWIPE_RATIO &&
+      Math.max(averageSpeed, swipe.speed) >= SWIPE_FLICK_SPEED
+    ) {
+      openFromSwipe();
+    }
+  }
+
+  function handlePanelSwipeStart(event) {
+    cancelPanelSwipe();
+
+    if (!panelVisible || event.touches.length !== 1) return;
+
+    const touch = event.touches[0];
+    const now = performance.now();
+
+    panelSwipe = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      lastX: touch.clientX,
+      lastTime: now,
+      speed: 0,
+      offset: 0,
+      committed: false,
+      past: false
+    };
+  }
+
+  function handlePanelSwipeMove(event) {
+    const swipe = panelSwipe;
+
+    if (!swipe) return;
+
+    if (event.touches.length !== 1 || !panelVisible) {
+      cancelPanelSwipe();
+      return;
+    }
+
+    const touch = event.touches[0];
+    const now = performance.now();
+    const deltaX = touch.clientX - swipe.startX;
+    const deltaY = touch.clientY - swipe.startY;
+
+    if (!swipe.committed) {
+      const distance = Math.max(Math.abs(deltaX), Math.abs(deltaY));
+
+      if (distance < SWIPE_DECIDE_PX) return;
+
+      // Up and down is the list scrolling. Only a drag to the right closes.
+      if (!(deltaX > 0 && Math.abs(deltaX) > Math.abs(deltaY) * SWIPE_RATIO)) {
+        panelSwipe = null;
+        return;
+      }
+
+      swipe.committed = true;
+
+      const panel = document.getElementById(PANEL_ID);
+
+      if (panel) {
+        panel.classList.add('tracking');
+      }
+    }
+
+    swipe.speed = (touch.clientX - swipe.lastX) / Math.max(1, now - swipe.lastTime);
+    swipe.lastX = touch.clientX;
+    swipe.lastTime = now;
+    swipe.offset = Math.max(0, deltaX);
+
+    // A light tick once the drag is far enough to close on release.
+    const past = swipe.offset >= SWIPE_CLOSE_PX;
+
+    if (past && !swipe.past) {
+      vibrate(6);
+    }
+
+    swipe.past = past;
+
+    if (panelSwipeFrame) return;
+
+    panelSwipeFrame = requestAnimationFrame(() => {
+      panelSwipeFrame = null;
+
+      const current = panelSwipe;
+      const panel = document.getElementById(PANEL_ID);
+
+      if (!current || !current.committed || !panel) return;
+
+      // Stays solid while it follows the finger, so it never turns
+      // see-through over the chat; it only eases off past the close point.
+      const beyond = Math.max(0, current.offset - SWIPE_CLOSE_PX);
+
+      panel.style.transform = `translateX(${Math.round(current.offset)}px)`;
+      panel.style.opacity = String(
+        Math.max(0.7, 1 - beyond / 400).toFixed(3)
+      );
+    });
+  }
+
+  function handlePanelSwipeEnd(event) {
+    const swipe = panelSwipe;
+
+    if (!swipe || !swipe.committed) {
+      panelSwipe = null;
+      return;
+    }
+
+    const quick =
+      swipe.speed >= SWIPE_FLICK_SPEED &&
+      swipe.offset >= SWIPE_CLOSE_FLICK_PX;
+
+    if (
+      event.type === 'touchend' &&
+      (swipe.offset >= SWIPE_CLOSE_PX || quick)
+    ) {
+      panelSwipe = null;
+
+      if (panelSwipeFrame) {
+        cancelAnimationFrame(panelSwipeFrame);
+        panelSwipeFrame = null;
+      }
+
+      closeFromSwipe(swipe.offset);
+      return;
+    }
+
+    // Let go early: spring back into place.
+    cancelPanelSwipe();
+  }
+
+  // Ends a panel drag and, if the panel had moved, lets it ease back.
+  function cancelPanelSwipe() {
+    const swipe = panelSwipe;
+
+    panelSwipe = null;
+
+    if (panelSwipeFrame) {
+      cancelAnimationFrame(panelSwipeFrame);
+      panelSwipeFrame = null;
+    }
+
+    if (!swipe || !swipe.committed) return;
+
+    const panel = document.getElementById(PANEL_ID);
+
+    if (!panel) return;
+
+    panel.classList.remove('tracking');
+    panel.style.transform = '';
+    panel.style.opacity = '';
+  }
+
+  function closeFromSwipe(offset) {
+    const panel = document.getElementById(PANEL_ID);
+
+    if (!panel) {
+      setPanelVisibility(false);
+      return;
+    }
+
+    // Carry on from where the finger left it and slide out to the right.
+    panel.classList.remove('tracking');
+    panel.classList.add('swipe-closing');
+    panel.style.transform = `translateX(${Math.round(offset + 56)}px)`;
+    panel.style.opacity = '0';
+
+    setPanelVisibility(false, { keepPose: true });
+
+    // Once it's out of sight, put the pose back for the next open.
+    poseTimer = setTimeout(() => {
+      poseTimer = null;
+      resetPanelPose(false);
+    }, SWIPE_RESET_MS);
   }
 
   // ---------------------------------------------------------------------------
@@ -2631,7 +3111,8 @@
     if (
       !panelVisible ||
       clickingTab ||
-      window.innerWidth > 768
+      window.innerWidth > 768 ||
+      performance.now() < suppressOutsideCloseUntil
     ) {
       return;
     }
@@ -2689,11 +3170,22 @@
     if (visibilityTimer) clearTimeout(visibilityTimer);
     if (dragFrame) cancelAnimationFrame(dragFrame);
     if (resizeFrame) cancelAnimationFrame(resizeFrame);
+    if (panelSwipeFrame) cancelAnimationFrame(panelSwipeFrame);
+    if (poseTimer) clearTimeout(poseTimer);
+
+    chatSwipe = null;
+    panelSwipe = null;
+    panelSwipeFrame = null;
+    poseTimer = null;
 
     navigationToken += 1;
 
     document.removeEventListener('keydown', handleKeydown, true);
     document.removeEventListener('click', handleOutsideClick, true);
+    document.removeEventListener('touchstart', handleChatSwipeStart);
+    document.removeEventListener('touchmove', handleChatSwipeMove);
+    document.removeEventListener('touchend', handleChatSwipeEnd);
+    document.removeEventListener('touchcancel', handleChatSwipeEnd);
     window.removeEventListener('pointermove', handleDragMove);
     window.removeEventListener('pointerup', handleDragEnd);
     window.removeEventListener('pointercancel', handleDragEnd);
@@ -2742,6 +3234,12 @@
     document.addEventListener('keydown', handleKeydown, true);
     document.addEventListener('click', handleOutsideClick, true);
 
+    // Swipe left on the chat to open. Passive, so scrolling never waits.
+    document.addEventListener('touchstart', handleChatSwipeStart, { passive: true });
+    document.addEventListener('touchmove', handleChatSwipeMove, { passive: true });
+    document.addEventListener('touchend', handleChatSwipeEnd, { passive: true });
+    document.addEventListener('touchcancel', handleChatSwipeEnd, { passive: true });
+
     window.addEventListener('pointermove', handleDragMove);
     window.addEventListener('pointerup', handleDragEnd);
     window.addEventListener('pointercancel', handleDragEnd);
@@ -2763,7 +3261,7 @@
     console.log(
       `[Page Outline v${VERSION}] Loaded. Drag the button anywhere ` +
       '(hold first on touch), double-click or double-tap it to reset, ' +
-      'or press Ctrl/Cmd + Shift + O.'
+      'press Ctrl/Cmd + Shift + O, or swipe left on the chat to open.'
     );
   }
 
