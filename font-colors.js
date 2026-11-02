@@ -6,8 +6,13 @@
  * Response text colors apply in dark mode.
  * Thinking area: the thinking text and tool-call rows (like "Parallel Web
  * search ...") get regular (non-italic) text and warm gray colors in dark
- * and light mode. The "Worked for 6s" label is left exactly as TypingMind
- * draws it. The thinking settings never touch your normal response text.
+ * and light mode. The "Worked for 6s" label and the thinking border's hover
+ * highlight are left exactly as TypingMind draws them. The thinking settings
+ * never touch your normal response text.
+ *
+ * v7: a TypingMind update removed the data-element-id="thinking-block" tag
+ * from the thinking box, so the box is now found by the clickable left
+ * border inside it. If TypingMind brings the old tag back, that still works.
  *
  * Check which version is running: type tmFontColorsVersion in the console.
  * Disable this script and refresh to restore the original styling.
@@ -15,7 +20,7 @@
 (() => {
   'use strict';
 
-  const VERSION = 6;
+  const VERSION = 7;
 
   // EDIT COLORS HERE. Example: bold: '#eeeae5'
   const COLORS = {
@@ -50,9 +55,18 @@
 
   /* ---------------- Thinking area selectors ---------------- */
 
-  // Thinking text. Its color is hard-coded with a Tailwind class, so it
+  // Thinking box. Its color is hard-coded with a Tailwind class, so it
   // needs a direct override instead of the prose variables above.
-  const THINKING = '[data-element-id="thinking-block"]';
+  //  1. Current TypingMind: the box has no id, so it's found by the
+  //     clickable left border it holds (a button with the class
+  //     group/thinking-border).
+  //  2. Older builds tagged the box itself with
+  //     data-element-id="thinking-block". That only counts on the bordered
+  //     box, so a wrapper around the "Worked for" label can never match.
+  const THINKING = [
+    'div:has(> .group\\/thinking-border)',
+    '[data-element-id="thinking-block"].border-l-2'
+  ];
 
   // Plugin call row: tool icon, "Parallel  Web search", then the arguments
   // in italics. It has no id, so it's matched by its classes inside AI
@@ -107,9 +121,10 @@
     const text = color(theme.text);
     const border = color(theme.border);
     const scope = theme.scope;
+    const thinking = THINKING.map(scope);
 
     if (text) {
-      rules.push(rule([scope(THINKING)], [
+      rules.push(rule(thinking, [
         `color: ${text} !important;`,
         ...THINKING_VARIABLES.map((variable) => `${variable}: ${text} !important;`)
       ]));
@@ -121,7 +136,7 @@
     }
 
     if (border) {
-      rules.push(rule([scope(THINKING)], [`border-left-color: ${border} !important;`]));
+      rules.push(rule(thinking, [`border-left-color: ${border} !important;`]));
     }
 
     return rules;
@@ -132,7 +147,7 @@
     const regular = ['font-style: normal !important;'];
 
     // Regular (non-italic) thinking text and tool arguments in every theme
-    rules.push(rule([THINKING], regular));
+    rules.push(rule(THINKING, regular));
     rules.push(rule([`${TOOL_ROW} .italic`], regular));
 
     const responseDeclarations = Object.keys(VARIABLES)
