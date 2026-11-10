@@ -2,7 +2,7 @@
   if (!/Android/i.test(navigator.userAgent)) return;
   if (!window.matchMedia('(display-mode: standalone)').matches) return;
 
-  const dark = '#171717';
+  const dark = '#161616';
 
   function keepDarkBar() {
     const metas = document.querySelectorAll('meta[name="theme-color"]');
