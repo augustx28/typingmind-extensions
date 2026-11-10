@@ -1,17 +1,10 @@
 (function () {
+  if (!/Android/i.test(navigator.userAgent)) return;
+  if (!window.matchMedia('(display-mode: standalone)').matches) return;
+
   const dark = '#171717';
 
-  function applyFix() {
-    let vp = document.querySelector('meta[name="viewport"]');
-    if (!vp) {
-      vp = document.createElement('meta');
-      vp.name = 'viewport';
-      document.head.appendChild(vp);
-    }
-    if (!vp.content.includes('viewport-fit=cover')) {
-      vp.content = (vp.content ? vp.content + ', ' : '') + 'viewport-fit=cover';
-    }
-
+  function keepDarkBar() {
     const metas = document.querySelectorAll('meta[name="theme-color"]');
     if (!metas.length) {
       const m = document.createElement('meta');
@@ -27,14 +20,32 @@
   }
 
   const style = document.createElement('style');
+  style.id = 'tm-android-safe-top';
   style.textContent = [
-    'html, body { background-color: ' + dark + ' !important; }',
-    'body { padding-bottom: env(safe-area-inset-bottom, 0px) !important; box-sizing: border-box !important; }'
+    'html, body { background-color: var(--main-dark-color, ' + dark + ') !important; }',
+    '#__next {',
+    '  position: fixed !important;',
+    '  top: env(safe-area-inset-top, 0px) !important;',
+    '  left: 0 !important;',
+    '  right: 0 !important;',
+    '  bottom: 0 !important;',
+    '  transform: translateZ(0) !important;',
+    '}',
+    '[data-element-id="main-content-area"] > main {',
+    '  height: calc(100dvh - env(safe-area-inset-top, 0px)) !important;',
+    '  max-height: calc(100dvh - env(safe-area-inset-top, 0px)) !important;',
+    '}',
+    '#headlessui-portal-root [role="dialog"] {',
+    '  padding-top: env(safe-area-inset-top, 0px) !important;',
+    '}'
   ].join('\n');
-  document.head.appendChild(style);
 
-  applyFix();
-  new MutationObserver(applyFix).observe(document.head, {
+  if (!document.getElementById(style.id)) {
+    document.head.appendChild(style);
+  }
+
+  keepDarkBar();
+  new MutationObserver(keepDarkBar).observe(document.head, {
     childList: true,
     subtree: true,
     attributes: true
