@@ -119,7 +119,7 @@
     tabW: 33,             // same as the height, so the chip is a circle
     tabH: 33,
     tabGap: 35,            // clear space between the chip and the message box
-    floatGap: 9,          // fully minimized: chip's distance from the bottom edge
+    floatGap: 8,          // fully minimized: chip's distance from the bottom edge
     floatFade: 44,        // fully minimized: height of the fade under the chip
     floatClear: 44,       // fully minimized: extra room after the last message
     entryMs: 3000,        // after opening a chat, how long to watch for it being new
