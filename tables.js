@@ -1,5 +1,5 @@
 /* ============================================================
-   TypingMind Table Tweaks  v2.0
+   TypingMind Table Tweaks  v2.1
    - Rounded corners drawn by the table itself, so the outer line
      follows the curve on all 4 corners (chat + expanded view)
    - Warm gray grid lines instead of TypingMind's blue-gray
@@ -17,7 +17,7 @@
   const HEADER_BG_DARK = '#000000';  // dark mode header row
   const FRAME_DARK = '#4a4744';      // dark mode outer line
   const LINE_DARK = '#3a3836';       // dark mode inner lines
-  const PANEL_DARK = '#282624';      // expanded view panel (was navy #0f172a)
+  const PANEL_DARK = '#282727';      // expanded view panel (was navy #0f172a)
   const FRAME_LIGHT = '#d6d3d1';     // light mode outer line
   const LINE_LIGHT = '#e7e5e4';      // light mode inner lines
   /* ------------------------------------------ */
