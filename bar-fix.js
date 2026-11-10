@@ -40,7 +40,7 @@
 
   // How far the app starts from the top: the status bar's height, minus
   // 6px so the header sits snug under it. Same as v4.
-  const GAP = 'max(0px, calc(env(safe-area-inset-top, 0px) - 6px))';
+  const GAP = 'max(0px, calc(env(safe-area-inset-top, 0px) - 5px))';
 
   // Height of the app once it starts below the status bar. 100dvh follows
   // the keyboard, so this shrinks when the keyboard opens.
