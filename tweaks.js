@@ -50,8 +50,10 @@
   // Where the UI weight applies: TypingMind's own app and its pop-up menus and
   // dialogs. Panels that other extensions add to the page sit outside these.
   const UI_WEIGHT_SCOPES = ["#__next", "#headlessui-portal-root", "[data-radix-popper-content-wrapper]"];
-  // Chat text that keeps the chat text weight: the conversation and the message box.
-  const CHAT_TEXT_ROOTS = ['[data-element-id="chat-space-middle-part"]', "#chat-input-textbox", '[data-element-id="chat-input-textbox"]'];
+  // Chat text that keeps the chat text weight: the conversation (replies and
+  // sent messages). The message box is part of the interface, so it follows
+  // the UI weight while you type.
+  const CHAT_TEXT_ROOTS = ['[data-element-id="chat-space-middle-part"]'];
   const DEFAULT_FONT_WEIGHT = '400';
   const FONT_FILE_MAX_BYTES = 4 * 1024 * 1024; // 4 MB raw file cap (localStorage is limited)
   const UPLOADED_FONT_FAMILY = 'TMTweaksUploadedFont';
@@ -502,8 +504,8 @@
   }
 
   // UI weight: puts the whole TypingMind interface (menus, sidebar, buttons,
-  // titles, settings) in one weight. The conversation and the message box are
-  // left out and keep the chat text weight, so bold words in chat stay bold.
+  // titles, settings, the message box) in one weight. The conversation is left
+  // out and keeps the chat text weight, so bold words in chat stay bold.
   // Only TypingMind's own app and its pop-ups are touched; panels from other
   // extensions, and this menu, keep their own look.
   function setUiWeightStyle(uiWeight, chatWeight) {
@@ -1931,7 +1933,7 @@
                 <option value="" selected>Default (TypingMind's mixed weights)</option>
                 ${ALL_FONT_WEIGHTS.map((weight) => `<option value="${weight}">${fontWeightLabel(weight)}</option>`).join("")}
             </select>
-            <small class="tweak-weight-explainer"><strong>What this changes:</strong> one weight for the whole interface: menus, sidebar, buttons, titles and settings. Chat replies and the message box use Chat text weight below. Default keeps TypingMind's usual mix.</small>
+            <small class="tweak-weight-explainer"><strong>What this changes:</strong> one weight for the whole interface: menus, sidebar, buttons, titles, settings and the message box you type in. Replies and sent messages use Chat text weight below. Default keeps TypingMind's usual mix.</small>
             <small id="${SCRIPT_PREFIX}ui-weight-info"></small>
         </div>
         <div class="tweak-font-preview" aria-hidden="true">
@@ -1966,7 +1968,7 @@
             <select id="${SCRIPT_PREFIX}font-weight-select">
                 ${ALL_FONT_WEIGHTS.map((weight) => `<option value="${weight}"${String(weight) === DEFAULT_FONT_WEIGHT ? " selected" : ""}>${fontWeightLabel(weight)}</option>`).join("")}
             </select>
-            <small class="tweak-weight-explainer"><strong>What this changes:</strong> how thick chat text is, meaning the replies and what you type in the message box. Bold words stay bold. If UI weight is on Default, this also sets the rest of the app's regular text.</small>
+            <small class="tweak-weight-explainer"><strong>What this changes:</strong> how thick chat text is, meaning the replies and your messages once they're sent. Bold words stay bold. If UI weight is on Default, this also sets the rest of the app's regular text, including the message box.</small>
         </div>
         <div class="${SCRIPT_PREFIX}button-group">
             <button type="button" class="${SCRIPT_PREFIX}reset-button" id="${SCRIPT_PREFIX}reset-font-button">Reset</button>
