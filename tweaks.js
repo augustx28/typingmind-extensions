@@ -90,6 +90,7 @@
     '[data-element-id="custom-chat-item"]',
     '[data-element-id="selected-chat-item"]',
     '[data-element-id="chat-folder"]',
+    '[data-element-id="new-chat-button-in-side-bar"]',
   ];
   const SIDEBAR_TEXT_TAGS = ["div", "span", "p", "a", "button"];
 
@@ -1984,7 +1985,7 @@
     uiSizeSection.appendChild(uiSizeHeader);
     const uiSizeNote = document.createElement("p");
     uiSizeNote.className = "tweak-section-note";
-    uiSizeNote.textContent = "Sizes the chat titles and folders in the left sidebar. Leave it empty to keep the TypingMind default. Allowed range: 8 to 40.";
+    uiSizeNote.textContent = "Sizes the New chat button, chat titles and folders in the left sidebar. Leave it empty to keep the TypingMind default. Allowed range: 8 to 40.";
     uiSizeSection.appendChild(uiSizeNote);
 
     const sidebarFontSizeInput = createTextInput("tweak_sidebarFontSize_input", "Chat list size (px):", settingsKeys.sidebarFontSize, "e.g., 16", "number", {
