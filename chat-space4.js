@@ -115,7 +115,7 @@
 
   const TWEAKS = {
     // Phone: how long the chevron stays before it fades away
-    hideAfterFull: 1200,  // everything showing: after the app opens, after
+    hideAfterFull: 2000,  // everything showing: after the app opens, after
                           // bringing things back, or after a tap on the chat
     hideAfterMin: 800,    // minimized: right after you minimize
 
